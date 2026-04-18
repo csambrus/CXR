@@ -1,0 +1,12 @@
+tensorflow
+keras
+numpy
+pandas
+scikit-learn
+matplotlib
+opencv-python
+pillow
+jupyterlab
+notebook
+tqdm
+kaggle>=1.7
