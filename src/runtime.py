@@ -1,7 +1,8 @@
 # src/runtime.py
+import os
 import multiprocessing
 import tensorflow as tf
-
+from tqdm import tqdm as notebook_tqdm
 
 def setup_tensorflow_runtime(verbose: bool = True) -> int:
     """
@@ -15,19 +16,57 @@ def setup_tensorflow_runtime(verbose: bool = True) -> int:
     int
         Elérhető CPU magok száma.
     """
-    gpus = tf.config.list_physical_devices("GPU")
-    cpu_count = multiprocessing.cpu_count()
 
-    if verbose:
-        print("Num GPUs Available:", len(gpus))
+    os.environ["XLA_FLAGS"] = (
+        "--xla_gpu_enable_triton_gemm=false "
+        "--xla_gpu_autotune_level=2"
+    )
 
     try:
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
     except Exception as e:
         print(f"[WARN] GPU memory growth beállítási hiba: {e}")
+    
+    
+    gpus = tf.config.list_physical_devices("GPU")
+    cpu_count = multiprocessing.cpu_count()
+    
+#    if verbose:
+#        print("Num GPUs Available:", len(gpus))
 
     if verbose:
-        print(f"Number of CPU cores: {cpu_count}")
+        print("TF version:", tf.__version__)
+        print("GPUs: ", gpus)
+        print("CPU cores: ", cpu_count)
+
+        print("CUDA_VISIBLE_DEVICES =", os.environ.get("CUDA_VISIBLE_DEVICES"))
+        print("TF version =", tf.__version__)
+        print("Built with CUDA =", tf.test.is_built_with_cuda())
+        print("GPUs =", tf.config.list_physical_devices("GPU"))
+        print("Logical GPUs =", tf.config.list_logical_devices("GPU"))
+   
+        run_gpu_test()
 
     return cpu_count
+
+def run_gpu_test() -> None:
+    import tensorflow as tf
+    import time
+    
+    gpus = tf.config.list_physical_devices("GPU")
+    print("GPUs:", gpus)
+    
+    if gpus:
+        with tf.device("/GPU:0"):
+            a = tf.random.normal((4096, 4096))
+            b = tf.random.normal((4096, 4096))
+    
+            t0 = time.time()
+            c = tf.matmul(a, b)
+            _ = c.numpy()
+            t1 = time.time()
+    
+        print("GPU matmul done in", t1 - t0, "sec")
+    else:
+        print("No GPU visible to TensorFlow")

@@ -2,83 +2,73 @@
 from __future__ import annotations
 
 import shutil
-import zipfile
-import subprocess
-
 from pathlib import Path
 import kagglehub
-import config
 
+from src.config import RAW_DIR 
 
 DATASET_SLUG = "unaissait/curated-chest-xray-image-dataset-for-covid19"
-ZIP_NAME = "curated-chest-xray-image-dataset-for-covid19.zip"
 
-def download_dataset() -> Path:
-    # Download latest version
-    path = kagglehub.dataset_download(DATASET_SLUG, output_dir = RAW_DIR)
-    print("Path to dataset files:", path)
-    return(path)
+TMP_DIR = RAW_DIR / "tmp"
+KAGGLE_ZIP_DIR = TMP_DIR / "Curated X-Ray Dataset"
+READY_MARKER = RAW_DIR / ".dataset_ready"
 
-def run_command(cmd: list[str]) -> None:
-    """Parancs futtatása hibakezeléssel."""
-    print("[CMD]", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+def dataset_exists() -> bool:
+    if READY_MARKER.exists():
+        return True
 
+    # fallback check (ha marker hiányzik)
+    # tipikusan class mappák vannak benne
+    expected = ["COVID-19", "Normal", "Pneumonia-Bacterial", "Pneumonia-Viral"]
+    return all((RAW_DIR / cls).exists() for cls in expected)
 
-def download_dataset_zip() -> Path:
-    """
-    Letölti a Kaggle dataset zip fájlt a data könyvtárba.
+def download_from_kaggle() -> Path:
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
 
-    Returns
-    -------
-    Path
-        A letöltött zip fájl útvonala.
-    """
-    config.ensure_project_dirs()
-    download_dir = config.DATA_DIR / "downloads"
-    download_dir.mkdir(parents=True, exist_ok=True)
+    print("[INFO] Downloading dataset...")
+    path = kagglehub.dataset_download(DATASET_SLUG, output_dir=TMP_DIR)
 
-    run_command([
-        "kaggle",
-        "datasets",
-        "download",
-        "-d",
-        DATASET_SLUG,
-        "-p",
-        str(download_dir),
-    ])
+    print("[INFO] Temp path:", path)
+    return Path(path)
 
-    zip_path = download_dir / ZIP_NAME
-    if not zip_path.exists():
-        raise FileNotFoundError(f"Nem található a letöltött zip: {zip_path}")
+def move_dataset():
+    # Kaggle zip miatt ez jön létre
+    src_dir = KAGGLE_ZIP_DIR
 
-    print(f"[INFO] Letöltve: {zip_path}")
-    return zip_path
+    if not src_dir.exists():
+        raise RuntimeError(f"[ERROR] Nem található: {src_dir}")
 
+    print("[INFO] Moving dataset to RAW_DIR...")
 
-def extract_dataset(zip_path: Path) -> Path:
-    """
-    Kicsomagolja a datasetet.
+    for item in src_dir.iterdir():
+        target = RAW_DIR / item.name
 
-    Returns
-    -------
-    Path
-        A kicsomagolt célmappa.
-    """
-    extract_dir = config.DATA_DIR / "raw_download"
-    extract_dir.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            print(f"[SKIP] már létezik: {target}")
+            continue
 
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(extract_dir)
+        shutil.move(str(item), str(target))
 
-    print(f"[INFO] Kicsomagolva ide: {extract_dir}")
-    return extract_dir
+    # cleanup
+    shutil.rmtree(TMP_DIR, ignore_errors=True)
+
+    # marker
+    READY_MARKER.touch()
+
+    print("[OK] Dataset ready at:", RAW_DIR)
 
 
-def main() -> None:
-    zip_path = download_dataset()
-    extract_dataset(zip_path)
+# ---------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------
+def download_dataset() -> None:
+    if dataset_exists():
+        print("[SKIP] Dataset already exists, no download needed.")
+        return
+
+    download_from_kaggle()
+    move_dataset()
 
 
 if __name__ == "__main__":
-    main()
+    download_dataset()

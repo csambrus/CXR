@@ -1,5 +1,8 @@
 # src/config.py
 from pathlib import Path
+from dataclasses import dataclass
+from typing import Any
+import json
 
 # =========================================================
 # Projekt gyökér
@@ -12,37 +15,42 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_DIR / "data"
 RAW_DIR = DATA_DIR / "raw"
 INTERIM_DIR = DATA_DIR / "interim"
-SPLITS_DIR = DATA_DIR / "splits"
-
+SPLITS_DIR = INTERIM_DIR / "splits"
 OUTPUT_DIR = PROJECT_DIR / "outputs"
+MODELS_DIR = INTERIM_DIR / "models"
+
 FIGURES_DIR = OUTPUT_DIR / "figures"
-MODELS_DIR = OUTPUT_DIR / "models"
 REPORTS_DIR = OUTPUT_DIR / "reports"
 LOGS_DIR = OUTPUT_DIR / "logs"
-
-SRC_DIR = PROJECT_DIR / "src"
-NOTEBOOKS_DIR = PROJECT_DIR / "notebooks"
 
 # =========================================================
 # Dataset / osztályok
 # =========================================================
-CLASS_NAMES = [
-    "normal",
-    "pneumonia_viral",
-    "pneumonia_bacterial",
-    "covid19",
+
+@dataclass(frozen=True)
+class ClassInfo:
+    key: str
+    raw_dir: str
+    display_name: str
+    idx: int
+
+CLASS_INFOS = [
+    ClassInfo("normal", "Normal", "Normal", 0),
+    ClassInfo("pneumonia_viral", "Pneumonia-Viral", "Pneumonia-Viral", 1),
+    ClassInfo("pneumonia_bacterial", "Pneumonia-Bacterial", "Pneumonia-Bacterial", 2),
+    ClassInfo("covid19", "COVID-19", "COVID-19", 3),
 ]
 
-NUM_CLASSES = len(CLASS_NAMES)
+NUM_CLASSES = len(CLASS_INFOS)
+CLASS_BY_KEY = {c.key: c for c in CLASS_INFOS}
+CLASS_BY_IDX = {c.idx: c for c in CLASS_INFOS}
 
-# Ha a raw datasetben más néven vannak a mappák, később itt lehet
-# átnevezési térképet kezelni.
-CLASS_NAME_MAP = {
-    "normal": "normal",
-    "pneumonia_viral": "pneumonia_viral",
-    "pneumonia_bacterial": "pneumonia_bacterial",
-    "covid19": "covid19",
-}
+# =========================================================
+# Split CSV-k
+# =========================================================
+TRAIN_CSV = SPLITS_DIR / "train.csv"
+VAL_CSV = SPLITS_DIR / "val.csv"
+TEST_CSV = SPLITS_DIR / "test.csv"
 
 # =========================================================
 # Input image paraméterek
@@ -59,13 +67,13 @@ TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
 
-RANDOM_STATE = 42
+SEED = 42
 SHUFFLE_DATA = True
 
 # =========================================================
 # DataLoader / tf.data
 # =========================================================
-BATCH_SIZE = 32
+BATCH_SIZE = 256
 AUTOTUNE = -1  # tf.data.AUTOTUNE majd runtime-ban lesz használva
 CACHE_DATASET = False
 PREFETCH_DATASET = True
@@ -94,31 +102,30 @@ BACKBONE_NAME = "DenseNet121"
 USE_IMAGENET_WEIGHTS = True
 FREEZE_BACKBONE = True
 
-# =========================================================
-# Fájlnevek / split CSV-k
-# =========================================================
-TRAIN_CSV = SPLITS_DIR / "train.csv"
-VAL_CSV = SPLITS_DIR / "val.csv"
-TEST_CSV = SPLITS_DIR / "test.csv"
 
 # =========================================================
-# Utility
+# Utilities
 # =========================================================
-SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp"}
+def ensure_dir(path: str | Path) -> Path:
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
+# Main project dirs:
+for d in [DATA_DIR, RAW_DIR, INTERIM_DIR, OUTPUT_DIR, SPLITS_DIR, FIGURES_DIR, MODELS_DIR, REPORTS_DIR, LOGS_DIR]:
+    ensure_dir(d)
 
-def ensure_project_dirs() -> None:
-    """Létrehozza a projekt fontos könyvtárait, ha még nem léteznek."""
-    dirs = [
-        DATA_DIR,
-        RAW_DIR,
-        INTERIM_DIR,
-        SPLITS_DIR,
-        OUTPUT_DIR,
-        FIGURES_DIR,
-        MODELS_DIR,
-        REPORTS_DIR,
-        LOGS_DIR,
-    ]
-    for d in dirs:
-        d.mkdir(parents=True, exist_ok=True)
+def get_class_names() -> list[str]:
+    return [c.display_name for c in CLASS_INFOS]
+
+def get_class_name(idx: int) -> str:
+    class_names = get_class_names()
+    if 0 <= idx < len(class_names):
+        return class_names[idx]
+    return f"class_{idx}"
+
+def save_json(data: dict[str, Any], path: str | Path) -> None:
+    path = Path(path)
+    ensure_dir(path.parent)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)

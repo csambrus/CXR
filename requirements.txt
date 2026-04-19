@@ -1,4 +1,4 @@
-tensorflow
+tensorflow[and-cuda]
 keras
 numpy
 pandas
@@ -6,7 +6,8 @@ scikit-learn
 matplotlib
 opencv-python
 pillow
-jupyterlab
-notebook
 tqdm
 kaggle>=1.7
+kagglehub
+ipywidgets
+jupyterlab_widgets
