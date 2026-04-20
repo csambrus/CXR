@@ -28,21 +28,6 @@ elif IS_RUNPOD:
 else:
     PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-# -------------------------------------------------
-# Data könyvtár
-# -------------------------------------------------
-
-
-# -------------------------------------------------
-# Info
-# -------------------------------------------------
-
-print("IS_COLAB:", IS_COLAB)
-print("IS_RUNPOD:", IS_RUNPOD)
-print("PROJECT_ROOT:", PROJECT_ROOT)
-print("DATA_DIR:", DATA_DIR)
-
-
 # =========================================================
 # Könyvtárak
 # =========================================================
@@ -62,6 +47,15 @@ FIGURES_DIR = OUTPUT_DIR / "figures"
 REPORTS_DIR = OUTPUT_DIR / "reports"
 LOGS_DIR = OUTPUT_DIR / "logs"
 
+
+# -------------------------------------------------
+# Info
+# -------------------------------------------------
+
+print("IS_COLAB:", IS_COLAB)
+print("IS_RUNPOD:", IS_RUNPOD)
+print("PROJECT_ROOT:", PROJECT_ROOT)
+print("DATA_DIR:", DATA_DIR)
 
 
 # =========================================================
