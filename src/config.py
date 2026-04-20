@@ -3,25 +3,66 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any
 import json
+import os
+import sys
 
-# =========================================================
+
+# -------------------------------------------------
+# Környezet felismerés
+# -------------------------------------------------
+
+IS_COLAB = "google.colab" in sys.modules
+IS_RUNPOD = "RUNPOD_POD_ID" in os.environ
+IS_KAGGLE = "KAGGLE_KERNEL_RUN_TYPE" in os.environ
+
+# -------------------------------------------------
 # Projekt gyökér
-# =========================================================
-PROJECT_DIR = Path(__file__).resolve().parents[1]
+# -------------------------------------------------
+
+if IS_COLAB:
+    PROJECT_ROOT = Path("/content/CXR")
+
+elif IS_RUNPOD:
+    PROJECT_ROOT = Path("/workspace/CXR")
+
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# -------------------------------------------------
+# Data könyvtár
+# -------------------------------------------------
+
+
+# -------------------------------------------------
+# Info
+# -------------------------------------------------
+
+print("IS_COLAB:", IS_COLAB)
+print("IS_RUNPOD:", IS_RUNPOD)
+print("PROJECT_ROOT:", PROJECT_ROOT)
+print("DATA_DIR:", DATA_DIR)
+
 
 # =========================================================
 # Könyvtárak
 # =========================================================
-DATA_DIR = PROJECT_DIR / "data"
+if IS_COLAB:
+    DATA_DIR = Path("/content/drive/MyDrive/CXR/data")
+    OUTPUT_DIR = Path("/content/drive/MyDrive/CXR/outputs")
+else:
+    DATA_DIR = PROJECT_DIR / "data"
+    OUTPUT_DIR = PROJECT_DIR / "outputs"
+
 RAW_DIR = DATA_DIR / "raw"
 INTERIM_DIR = DATA_DIR / "interim"
 SPLITS_DIR = INTERIM_DIR / "splits"
-OUTPUT_DIR = PROJECT_DIR / "outputs"
 MODELS_DIR = INTERIM_DIR / "models"
 
 FIGURES_DIR = OUTPUT_DIR / "figures"
 REPORTS_DIR = OUTPUT_DIR / "reports"
 LOGS_DIR = OUTPUT_DIR / "logs"
+
+
 
 # =========================================================
 # Dataset / osztályok
