@@ -7,6 +7,7 @@ from typing import Sequence
 
 import pandas as pd
 from sklearn.model_selection import train_test_split
+import tensorflow as tf
 
 from src.config import (
     BATCH_SIZE,
@@ -264,6 +265,16 @@ def export_distribution_csvs(
 # DataFrame -> tf.data
 # =========================================================
 
+def optimize_dataset(ds, training: bool = False):
+    """
+    Egyszerű tf.data optimalizálás.
+    - train: shuffle már korábban történik, itt cache + prefetch
+    - val/test: cache + prefetch
+    """
+    ds = ds.cache()
+    ds = ds.prefetch(buffer_size=tf.data.AUTOTUNE)
+    return ds
+
 def dataframe_to_dataset(
     df: pd.DataFrame,
     image_size: tuple[int, int] = IMAGE_SIZE,
@@ -275,7 +286,7 @@ def dataframe_to_dataset(
     if df.empty:
         raise ValueError("Az input DataFrame üres, nem lehet datasetet építeni.")
 
-    return build_classification_dataset(
+    ds = build_classification_dataset(
         filepaths=df["filepath"].tolist(),
         labels=df["label"].tolist(),
         image_size=image_size,
@@ -284,6 +295,9 @@ def dataframe_to_dataset(
         shuffle=shuffle,
         seed=seed,
     )
+
+    ds = optimize_dataset(ds, training=training)
+    return ds
 
 
 # =========================================================
