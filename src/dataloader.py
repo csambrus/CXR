@@ -21,6 +21,7 @@ from src.config import (
 )
 from src.preprocessing import (
     build_classification_dataset,
+    apply_batch_augmentation,
     get_all_image_files,
     get_class_dir,
 )
@@ -265,16 +266,6 @@ def export_distribution_csvs(
 # DataFrame -> tf.data
 # =========================================================
 
-def optimize_dataset(ds, training: bool = False):
-    """
-    Egyszerű tf.data optimalizálás.
-    - train: shuffle már korábban történik, itt cache + prefetch
-    - val/test: cache + prefetch
-    """
-    ds = ds.cache()
-    ds = ds.prefetch(buffer_size=tf.data.AUTOTUNE)
-    return ds
-
 def dataframe_to_dataset(
     df: pd.DataFrame,
     image_size: tuple[int, int] = IMAGE_SIZE,
@@ -290,13 +281,20 @@ def dataframe_to_dataset(
         filepaths=df["filepath"].tolist(),
         labels=df["label"].tolist(),
         image_size=image_size,
-        batch_size=batch_size,
         training=training,
         shuffle=shuffle,
         seed=seed,
     )
 
-    ds = optimize_dataset(ds, training=training)
+    if CACHE_DATASET:
+        ds = ds.cache()
+    
+    ds = ds.batch(batch_size)
+
+    if training:
+        ds = apply_batch_augmentation(ds)
+    
+    ds = ds.prefetch(tf.data.AUTOTUNE)   
     return ds
 
 
