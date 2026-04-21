@@ -47,6 +47,14 @@ FIGURES_DIR = OUTPUT_DIR / "figures"
 REPORTS_DIR = OUTPUT_DIR / "reports"
 LOGS_DIR = OUTPUT_DIR / "logs"
 
+# segmentation related dirs
+SEGMENTATION_DIR = OUTPUT_DIR / "segmentation"
+SEGMENTATION_DATA_DIR = SEGMENTATION_DIR / "data"
+SEGMENTATION_MODELS_DIR = SEGMENTATION_DIR / "models"
+
+LUNG_MASK_DIR = SEGMENTATION_DATA_DIR / "lung_masks"
+LUNG_MASKED_DIR = SEGMENTATION_DATA_DIR / "lung_masked"
+LUNG_CROP_DIR = SEGMENTATION_DATA_DIR / "lung_crop"
 
 # -------------------------------------------------
 # Info
@@ -148,6 +156,18 @@ def ensure_dir(path: str | Path) -> Path:
 # Main project dirs:
 for d in [DATA_DIR, RAW_DIR, INTERIM_DIR, OUTPUT_DIR, SPLITS_DIR, FIGURES_DIR, MODELS_DIR, REPORTS_DIR, LOGS_DIR]:
     ensure_dir(d)
+
+def get_data_root(variant: str = "raw") -> Path:
+    variant = variant.lower()
+    if variant == "raw":
+        return RAW_DIR
+    if variant == "lung_mask":
+        return LUNG_MASK_DIR
+    if variant == "lung_masked":
+        return LUNG_MASKED_DIR
+    if variant == "lung_crop":
+        return LUNG_CROP_DIR
+    raise ValueError(f"Unknown data variant: {variant}")
 
 def get_class_names() -> list[str]:
     return [c.display_name for c in CLASS_INFOS]
