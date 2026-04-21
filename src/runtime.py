@@ -22,16 +22,15 @@ def setup_tensorflow_runtime(verbose: bool = True) -> int:
         "--xla_gpu_autotune_level=2"
     )
 
+    gpus = tf.config.list_physical_devices("GPU")
+    cpu_count = multiprocessing.cpu_count()
+    
     try:
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
     except Exception as e:
         print(f"[WARN] GPU memory growth beállítási hiba: {e}")
-    
-    
-    gpus = tf.config.list_physical_devices("GPU")
-    cpu_count = multiprocessing.cpu_count()
-    
+     
 #    if verbose:
 #        print("Num GPUs Available:", len(gpus))
 
@@ -43,7 +42,7 @@ def setup_tensorflow_runtime(verbose: bool = True) -> int:
         print("CUDA_VISIBLE_DEVICES =", os.environ.get("CUDA_VISIBLE_DEVICES"))
         print("TF version =", tf.__version__)
         print("Built with CUDA =", tf.test.is_built_with_cuda())
-        print("GPUs =", tf.config.list_physical_devices("GPU"))
+        print("GPUs =", gpus)
         print("Logical GPUs =", tf.config.list_logical_devices("GPU"))
    
         run_gpu_test()
