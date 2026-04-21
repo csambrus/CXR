@@ -108,7 +108,7 @@ SHUFFLE_DATA = True
 # =========================================================
 # DataLoader / tf.data
 # =========================================================
-BATCH_SIZE = 256
+BATCH_SIZE =1024
 AUTOTUNE = -1  # tf.data.AUTOTUNE majd runtime-ban lesz használva
 CACHE_DATASET = False
 PREFETCH_DATASET = True
