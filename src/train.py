@@ -476,7 +476,18 @@ def run_training(
         batch_size=batch_size,
         seed=seed,
     )
+    
+    # -----------------------------------------------------
+    # Speed test
+    # -----------------------------------------------------
+    import time
+    print("\n[INFO] Dataset quick check...")
+    t0 = time.time()
+    for i, (x, y) in enumerate(train_ds.take(3)):
+        print(f"  batch {i}: x={x.shape}, y={y.shape}")
+    print(f"[INFO] 3 batch load time: {time.time() - t0:.2f} sec")
 
+    
     # -----------------------------------------------------
     # Modell
     # -----------------------------------------------------
