@@ -442,18 +442,34 @@ def build_datasets_from_split_csvs(
 # Egyszerű sanity check
 # =========================================================
 
-def inspect_batch(ds, n_classes: int | None = None) -> None:
+def inspect_batch(ds, n_classes: int | None = None, sample_size: int = 16) -> None:
     """
-    Kiírja az első batch alakját és néhány labelt.
+    Kiír egy batch shape-et, majd random label mintát a batch-ből
+    (nem az első elemeket).
     """
     for images, labels in ds.take(1):
+        batch_size = images.shape[0]
+
         print(f"images shape: {images.shape}")
         print(f"labels shape: {labels.shape}")
-        print(f"labels sample: {labels[:16].numpy().tolist()}")
+
+        # Hány mintát írjunk ki max.
+        k = min(sample_size, batch_size)
+
+        # Véletlen indexek ismétlés nélkül
+        idx = np.random.choice(batch_size, size=k, replace=False)
+
+        sampled_labels = tf.gather(labels, idx).numpy().tolist()
+
+        print(f"random labels sample: {sampled_labels}")
+
+        # opcionálisan indexeket is kiírhatjuk
+        print(f"sample indices: {idx.tolist()}")
+
         if n_classes is not None:
             print(f"n_classes: {n_classes}")
-        break
 
+        break
 
 # =========================================================
 # Opcionális main
