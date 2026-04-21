@@ -9,10 +9,9 @@ from typing import Iterable, Sequence
 import matplotlib.pyplot as plt
 import tensorflow as tf
 
-from src.config import CLASS_INFOS, ClassInfo, IMAGE_SIZE, RAW_DIR, SEED, ensure_dir
+from src.config import CLASS_INFOS, ClassInfo, IMAGE_SIZE, RAW_DIR, SEED, ensure_dir, BATCH_SIZE
 
 AUTOTUNE = tf.data.AUTOTUNE
-
 
 # =========================================================
 # Alap utilok
@@ -289,14 +288,14 @@ def build_classification_dataset(
     filepaths: Sequence[str] | Sequence[Path],
     labels: Sequence[int],
     image_size: tuple[int, int] = IMAGE_SIZE,
-    batch_size: int = 16,
+    batch_size: int = BATCH_SIZE,
     training: bool = False,
     shuffle: bool = True,
     seed: int = SEED,
     apply_crop: bool = False,
     apply_contrast_norm: bool = False,
     use_fast_contrast: bool = True,
-    cache: bool = True,
+    cache: bool = False,
 ):
     preprocess = XrayPreprocessLayer(
         image_size=image_size,
