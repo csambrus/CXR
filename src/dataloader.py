@@ -16,6 +16,7 @@ from src.config import (
     IMAGE_SIZE,
     RAW_DIR,
     SEED,
+    CACHE_DATASET,
     ClassInfo,
     ensure_dir
 )
