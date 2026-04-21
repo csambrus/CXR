@@ -1,500 +1,220 @@
-# dataloader.py
-
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence
+from typing import Callable
 
 import pandas as pd
-from sklearn.model_selection import train_test_split
 import tensorflow as tf
-import numpy as np
 
 from src.config import (
     BATCH_SIZE,
-    CLASS_BY_IDX,
-    CLASS_INFOS,
+    CACHE_DATASET,
     IMAGE_SIZE,
     RAW_DIR,
     SEED,
-    CACHE_DATASET,
-    ClassInfo,
-    ensure_dir
-)
-from src.preprocessing import (
-    build_classification_dataset,
-    apply_batch_augmentation,
-    get_all_image_files,
-    get_class_dir,
 )
 
+AUTOTUNE = tf.data.AUTOTUNE
+
+
 # =========================================================
-# Metadata tábla építés
+# Path helpers
 # =========================================================
 
-def build_metadata_dataframe(
-    root_dir: str | Path = RAW_DIR,
-    class_infos: Sequence[ClassInfo] = CLASS_INFOS,
-) -> pd.DataFrame:
-    """
-    A root_dir alatt a class mappákból metadata DataFrame-et épít.
+def resolve_image_path(root_dir: str | Path, relative_path: str) -> str:
+    return str(Path(root_dir) / relative_path)
 
-    Kimeneti oszlopok:
-        filepath
-        filename
-        class_key
-        class_name
-        label
-        raw_dir
-    """
-    root_dir = Path(root_dir)
 
-    rows: list[dict] = []
+def read_split_csv(split_csv_path: str | Path) -> pd.DataFrame:
+    split_csv_path = Path(split_csv_path)
+    df = pd.read_csv(split_csv_path)
 
-    for class_info in class_infos:
-        class_dir = get_class_dir(root_dir, class_info)
+    required_cols = {"relative_path", "label"}
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"Missing required columns in {split_csv_path}: {sorted(missing)}"
+        )
 
-        if not class_dir.exists():
-            print(f"[WARN] Missing class dir: {class_dir}")
-            continue
-
-        files = get_all_image_files(class_dir)
-        print(f"[INFO] {class_info.display_name}: {len(files)} image(s)")
-
-        for fp in files:
-            rows.append(
-                {
-                    "filepath": str(fp),
-                    "filename": fp.name,
-                    "class_key": class_info.key,
-                    "class_name": class_info.display_name,
-                    "label": class_info.idx,
-                    "raw_dir": class_info.raw_dir,
-                }
-            )
-
-    df = pd.DataFrame(rows)
-
-    if df.empty:
-        print(f"[WARN] No image files found under: {root_dir}")
-        return df
-
-    df = df.sort_values(["label", "filepath"]).reset_index(drop=True)
     return df
 
 
 # =========================================================
-# QC / class distribution
+# Image loading
 # =========================================================
 
-def get_class_distribution(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Osztályeloszlás DataFrame-et ad vissza.
-    """
-    if df.empty:
-        return pd.DataFrame(
-            columns=["label", "class_key", "class_name", "count", "ratio"]
-        )
-
-    dist = (
-        df.groupby(["label", "class_key", "class_name"], as_index=False)
-        .size()
-        .rename(columns={"size": "count"})
-        .sort_values("label")
-        .reset_index(drop=True)
-    )
-    dist["ratio"] = dist["count"] / dist["count"].sum()
-    return dist
-
-
-def print_class_distribution(df: pd.DataFrame, title: str = "Class distribution") -> None:
-    print(f"\n{title}")
-    print("-" * 72)
-
-    if df.empty:
-        print("[WARN] Empty dataframe.")
-        print("-" * 72)
-        return
-
-    dist = get_class_distribution(df)
-
-    for _, row in dist.iterrows():
-        print(
-            f"{int(row['label']):>2} | "
-            f"{row['class_key']:<22} | "
-            f"{row['class_name']:<22} | "
-            f"{int(row['count']):>6} | "
-            f"{row['ratio'] * 100:>6.2f}%"
-        )
-
-    print("-" * 72)
-    print(f"Total: {len(df)}")
-
-
-# =========================================================
-# Split
-# =========================================================
-
-def split_metadata_dataframe(
-    df: pd.DataFrame,
-    test_size: float = 0.15,
-    val_size: float = 0.15,
-    seed: int = SEED,
-    stratify: bool = True,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Kétlépcsős train / val / test split.
-
-    Megjegyzés:
-    - test_size és val_size a teljes dataset arányai
-    - a val split a maradék trainből kerül leválasztásra úgy,
-      hogy globálisan kb. a megadott arány jöjjön ki
-
-    Példa:
-        test_size=0.15, val_size=0.15
-        => kb. 70 / 15 / 15
-    """
-    if df.empty:
-        raise ValueError("A metadata dataframe üres, nem lehet splitelni.")
-
-    if test_size <= 0 or test_size >= 1:
-        raise ValueError("A test_size értéke 0 és 1 közé kell essen.")
-    if val_size <= 0 or val_size >= 1:
-        raise ValueError("A val_size értéke 0 és 1 közé kell essen.")
-    if test_size + val_size >= 1:
-        raise ValueError("A test_size + val_size összege legyen 1-nél kisebb.")
-
-    stratify_labels = df["label"] if stratify else None
-
-    train_val_df, test_df = train_test_split(
-        df,
-        test_size=test_size,
-        random_state=seed,
-        stratify=stratify_labels,
-    )
-
-    remaining = 1.0 - test_size
-    val_relative = val_size / remaining
-
-    stratify_labels_2 = train_val_df["label"] if stratify else None
-
-    train_df, val_df = train_test_split(
-        train_val_df,
-        test_size=val_relative,
-        random_state=seed,
-        stratify=stratify_labels_2,
-    )
-
-    train_df = train_df.sort_values(["label", "filepath"]).reset_index(drop=True)
-    val_df = val_df.sort_values(["label", "filepath"]).reset_index(drop=True)
-    test_df = test_df.sort_values(["label", "filepath"]).reset_index(drop=True)
-
-    return train_df, val_df, test_df
-
-
-# =========================================================
-# Split QC
-# =========================================================
-
-def print_split_summary(
-    train_df: pd.DataFrame,
-    val_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-) -> None:
-    total = len(train_df) + len(val_df) + len(test_df)
-
-    print("\nSplit summary")
-    print("-" * 72)
-    print(f"Train: {len(train_df):>6} ({100 * len(train_df) / max(total, 1):>6.2f}%)")
-    print(f"Val:   {len(val_df):>6} ({100 * len(val_df) / max(total, 1):>6.2f}%)")
-    print(f"Test:  {len(test_df):>6} ({100 * len(test_df) / max(total, 1):>6.2f}%)")
-    print(f"Total: {total:>6}")
-    print("-" * 72)
-
-    print_class_distribution(train_df, title="Train class distribution")
-    print_class_distribution(val_df, title="Validation class distribution")
-    print_class_distribution(test_df, title="Test class distribution")
-
-
-# =========================================================
-# Export
-# =========================================================
-
-def export_split_csvs(
-    train_df: pd.DataFrame,
-    val_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-    out_dir: str | Path,
-    prefix: str = "split",
-) -> None:
-    out_dir = ensure_dir(out_dir)
-
-    train_path = out_dir / f"{prefix}_train.csv"
-    val_path = out_dir / f"{prefix}_val.csv"
-    test_path = out_dir / f"{prefix}_test.csv"
-
-    train_df.to_csv(train_path, index=False)
-    val_df.to_csv(val_path, index=False)
-    test_df.to_csv(test_path, index=False)
-
-    print(f"[INFO] Saved: {train_path}")
-    print(f"[INFO] Saved: {val_path}")
-    print(f"[INFO] Saved: {test_path}")
-
-
-def export_distribution_csvs(
-    train_df: pd.DataFrame,
-    val_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-    out_dir: str | Path,
-    prefix: str = "distribution",
-) -> None:
-    out_dir = ensure_dir(out_dir)
-
-    get_class_distribution(train_df).to_csv(
-        out_dir / f"{prefix}_train.csv", index=False
-    )
-    get_class_distribution(val_df).to_csv(
-        out_dir / f"{prefix}_val.csv", index=False
-    )
-    get_class_distribution(test_df).to_csv(
-        out_dir / f"{prefix}_test.csv", index=False
-    )
-
-    print(f"[INFO] Saved distribution CSVs to: {out_dir}")
-
-
-# =========================================================
-# DataFrame -> tf.data
-# =========================================================
-
-def dataframe_to_dataset(
-    df: pd.DataFrame,
+def load_image_from_path(
+    path: tf.Tensor,
+    label: tf.Tensor,
     image_size: tuple[int, int] = IMAGE_SIZE,
-    batch_size: int = BATCH_SIZE,
-    training: bool = False,
-    shuffle: bool = True,
-    seed: int = SEED,
+    channels: int = 1,
 ):
-    if df.empty:
-        raise ValueError("Az input DataFrame üres, nem lehet datasetet építeni.")
+    image_bytes = tf.io.read_file(path)
+    image = tf.image.decode_image(image_bytes, channels=channels, expand_animations=False)
+    image.set_shape([None, None, channels])
 
-    ds = build_classification_dataset(
-        filepaths=df["filepath"].tolist(),
-        labels=df["label"].tolist(),
-        image_size=image_size,
-        training=training,
-        shuffle=shuffle,
-        seed=seed,
+    image = tf.image.resize(image, image_size)
+    image = tf.cast(image, tf.float32) / 255.0
+
+    return image, tf.cast(label, tf.int32)
+
+
+# =========================================================
+# Augmentation
+# =========================================================
+
+def build_default_augmentation() -> tf.keras.Sequential:
+    return tf.keras.Sequential(
+        [
+            tf.keras.layers.RandomFlip("horizontal"),
+            tf.keras.layers.RandomRotation(0.03),
+            tf.keras.layers.RandomZoom(height_factor=0.05, width_factor=0.05),
+            tf.keras.layers.RandomTranslation(height_factor=0.03, width_factor=0.03),
+            tf.keras.layers.RandomContrast(0.10),
+        ],
+        name="cxr_augmentation",
     )
 
-    if CACHE_DATASET:
+
+# =========================================================
+# Dataset builders
+# =========================================================
+
+def build_dataset_from_dataframe(
+    df: pd.DataFrame,
+    root_dir: str | Path,
+    batch_size: int = BATCH_SIZE,
+    shuffle: bool = False,
+    augment_fn: Callable | None = None,
+    cache: bool = CACHE_DATASET,
+    image_size: tuple[int, int] = IMAGE_SIZE,
+    channels: int = 1,
+):
+    if len(df) == 0:
+        raise ValueError("Received empty dataframe.")
+
+    paths = [resolve_image_path(root_dir, p) for p in df["relative_path"].tolist()]
+    labels = df["label"].astype(int).tolist()
+
+    ds = tf.data.Dataset.from_tensor_slices((paths, labels))
+
+    if shuffle:
+        ds = ds.shuffle(
+            buffer_size=len(df),
+            seed=SEED,
+            reshuffle_each_iteration=True,
+        )
+
+    ds = ds.map(
+        lambda p, y: load_image_from_path(
+            p,
+            y,
+            image_size=image_size,
+            channels=channels,
+        ),
+        num_parallel_calls=AUTOTUNE,
+    )
+
+    if cache:
         ds = ds.cache()
-    
-    ds = ds.batch(batch_size)
 
-    if training:
-        ds = apply_batch_augmentation(ds)
-    
-    ds = ds.prefetch(tf.data.AUTOTUNE)   
-    return ds
-
-
-# =========================================================
-# High-level helper
-# =========================================================
-
-def build_datasets_from_root(
-    root_dir: str | Path = RAW_DIR,
-    test_size: float = 0.15,
-    val_size: float = 0.15,
-    image_size: tuple[int, int] = IMAGE_SIZE,
-    batch_size: int = BATCH_SIZE,
-    seed: int = SEED,
-    stratify: bool = True,
-    export_dir: str | Path | None = None,
-):
-    """
-    Komplett pipeline:
-    - metadata df építés
-    - split
-    - tf.data datasetek létrehozása
-    - opcionális CSV export
-
-    Visszatérés:
-        train_ds, val_ds, test_ds, train_df, val_df, test_df
-    """
-    df = build_metadata_dataframe(root_dir=root_dir)
-
-    if df.empty:
-        raise ValueError(f"Nem találtam használható képeket itt: {root_dir}")
-
-    print_class_distribution(df, title="Full dataset class distribution")
-
-    train_df, val_df, test_df = split_metadata_dataframe(
-        df,
-        test_size=test_size,
-        val_size=val_size,
-        seed=seed,
-        stratify=stratify,
-    )
-
-    print_split_summary(train_df, val_df, test_df)
-
-    if export_dir is not None:
-        export_split_csvs(train_df, val_df, test_df, export_dir, prefix="split")
-        export_distribution_csvs(
-            train_df, val_df, test_df, export_dir, prefix="distribution"
+    if augment_fn is not None:
+        ds = ds.map(
+            lambda x, y: (augment_fn(x, training=True), y),
+            num_parallel_calls=AUTOTUNE,
         )
 
-    train_ds = dataframe_to_dataset(
-        train_df,
-        image_size=image_size,
-        batch_size=batch_size,
-        training=True,
-        shuffle=True,
-        seed=seed,
-    )
-
-    val_ds = dataframe_to_dataset(
-        val_df,
-        image_size=image_size,
-        batch_size=batch_size,
-        training=False,
-        shuffle=False,
-        seed=seed,
-    )
-
-    test_ds = dataframe_to_dataset(
-        test_df,
-        image_size=image_size,
-        batch_size=batch_size,
-        training=False,
-        shuffle=False,
-        seed=seed,
-    )
-
-    return train_ds, val_ds, test_ds, train_df, val_df, test_df
-
-
-# =========================================================
-# Beolvasás meglévő split CSV-kből
-# =========================================================
-
-def load_split_csvs(
-    split_dir: str | Path,
-    prefix: str = "split",
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    split_dir = Path(split_dir)
-
-    train_path = split_dir / f"{prefix}_train.csv"
-    val_path = split_dir / f"{prefix}_val.csv"
-    test_path = split_dir / f"{prefix}_test.csv"
-
-    train_df = pd.read_csv(train_path)
-    val_df = pd.read_csv(val_path)
-    test_df = pd.read_csv(test_path)
-
-    return train_df, val_df, test_df
+    ds = ds.batch(batch_size).prefetch(AUTOTUNE)
+    return ds
 
 
 def build_datasets_from_split_csvs(
     split_dir: str | Path,
-    prefix: str = "split",
-    image_size: tuple[int, int] = IMAGE_SIZE,
+    data_root: str | Path | None = None,
     batch_size: int = BATCH_SIZE,
-    seed: int = SEED,
+    augment_fn: Callable | None = None,
+    cache: bool = CACHE_DATASET,
+    image_size: tuple[int, int] = IMAGE_SIZE,
+    channels: int = 1,
 ):
-    train_df, val_df, test_df = load_split_csvs(split_dir, prefix=prefix)
+    split_dir = Path(split_dir)
+    data_root = Path(data_root) if data_root is not None else RAW_DIR
 
-    print_split_summary(train_df, val_df, test_df)
+    train_df = read_split_csv(split_dir / "train.csv")
+    val_df = read_split_csv(split_dir / "val.csv")
+    test_df = read_split_csv(split_dir / "test.csv")
 
-    train_ds = dataframe_to_dataset(
+    train_ds = build_dataset_from_dataframe(
         train_df,
-        image_size=image_size,
+        root_dir=data_root,
         batch_size=batch_size,
-        training=True,
         shuffle=True,
-        seed=seed,
+        augment_fn=augment_fn,
+        cache=cache,
+        image_size=image_size,
+        channels=channels,
     )
-
-    val_ds = dataframe_to_dataset(
+    val_ds = build_dataset_from_dataframe(
         val_df,
-        image_size=image_size,
+        root_dir=data_root,
         batch_size=batch_size,
-        training=False,
         shuffle=False,
-        seed=seed,
+        augment_fn=None,
+        cache=cache,
+        image_size=image_size,
+        channels=channels,
     )
-
-    test_ds = dataframe_to_dataset(
+    test_ds = build_dataset_from_dataframe(
         test_df,
-        image_size=image_size,
+        root_dir=data_root,
         batch_size=batch_size,
-        training=False,
         shuffle=False,
-        seed=seed,
+        augment_fn=None,
+        cache=cache,
+        image_size=image_size,
+        channels=channels,
     )
 
-    return train_ds, val_ds, test_ds, train_df, val_df, test_df
+    return train_ds, val_ds, test_ds
 
 
 # =========================================================
-# Egyszerű sanity check
+# Diagnostics
 # =========================================================
 
-def inspect_batch(
-    ds,
-    n_classes: int | None = None,
-    sample_size: int = 16,
-    shuffle_buffer: int = 5000,
-) -> None:
-    """
-    Valóban random rekordokat vesz a TELJES datasetből
-    """
-    sampled = (
-        ds.unbatch()
-        .shuffle(shuffle_buffer, reshuffle_each_iteration=True)
-        .take(sample_size)
-        .batch(sample_size)
-    )
+def summarize_split(split_dir: str | Path) -> dict[str, pd.DataFrame]:
+    split_dir = Path(split_dir)
 
-    for images, labels in sampled.take(1):
-        batch_size = images.shape[0]
+    result = {}
+    for split_name in ["train", "val", "test"]:
+        df = read_split_csv(split_dir / f"{split_name}.csv")
+        summary = (
+            df.groupby(["label", "class_name"], dropna=False)
+            .size()
+            .reset_index(name="count")
+            .sort_values("label")
+            .reset_index(drop=True)
+        )
+        result[split_name] = summary
 
-        print(f"images shape: {images.shape}")
-        print(f"labels shape: {labels.shape}")
+    return result
 
-        # Hány mintát írjunk ki max.
-        k = min(sample_size, batch_size)
 
-        # Véletlen indexek ismétlés nélkül
-        idx = np.random.choice(batch_size, size=k, replace=False)
+def print_split_summary(split_dir: str | Path) -> None:
+    summaries = summarize_split(split_dir)
 
-        sampled_labels = tf.gather(labels, idx).numpy().tolist()
+    for split_name, summary_df in summaries.items():
+        print(f"\n{split_name.title()} class distribution")
+        print("-" * 72)
+        total = int(summary_df["count"].sum())
 
-        print(f"random labels sample: {sampled_labels}")
-
-        # opcionálisan indexeket is kiírhatjuk
-        print(f"sample indices: {idx.tolist()}")
-
-        if n_classes is not None:
-            print(f"n_classes: {n_classes}")
-
-        break
-
-# =========================================================
-# Opcionális main
-# =========================================================
-
-if __name__ == "__main__":
-    EXPORT_DIR = Path("outputs") / "splits"
-
-    train_ds, val_ds, test_ds, train_df, val_df, test_df = build_datasets_from_root(
-        root_dir=RAW_DIR,
-        test_size=0.15,
-        val_size=0.15,
-        export_dir=EXPORT_DIR,
-    )
-
-    inspect_batch(train_ds, n_classes=len(CLASS_BY_IDX))
+        for _, row in summary_df.iterrows():
+            pct = 100.0 * row["count"] / total if total > 0 else 0.0
+            print(
+                f"{int(row['label']):>2} | "
+                f"{str(row['class_name']):<22} | "
+                f"{int(row['count']):>6} | "
+                f"{pct:6.2f}%"
+            )
+        print("-" * 72)
+        print(f"Total: {total}")
