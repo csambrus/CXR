@@ -39,7 +39,7 @@ def load_model_by_name(model_name: str):
     if not model_path.exists():
         raise FileNotFoundError(f"Nincs modell: {model_name}")
 
-    model = tf.keras.models.load_model(model_path, safe_mode = FALSE)
+    model = tf.keras.models.load_model(model_path, safe_mode = False)
     last_conv = find_last_conv_layer_name(model)
 
     return model, last_conv
