@@ -1,308 +1,125 @@
-# src/train_cnn.py
-
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
+import matplotlib.pyplot as plt
 import pandas as pd
 import tensorflow as tf
 
 from src.config import (
     BATCH_SIZE,
-    CLASS_INFOS,
     IMAGE_SIZE,
-    NUM_CLASSES,
-    SEED,
     MODELS_DIR,
-    SPLITS_DIR,
+    NUM_CLASSES,
+    NUM_EPOCHS_DEFAULT,
+    PLOT_DPI,
+    SEED,
     ensure_dir,
     get_class_names,
+    get_data_root,
     save_json,
+    set_global_seed,
 )
-from src.dataloader import build_datasets_from_split_csvs
-
-
-def set_global_seed(seed: int = SEED) -> None:
-    tf.keras.utils.set_random_seed(seed)
+from src.dataloader import build_datasets_from_split_csvs, build_default_augmentation
 
 
 # =========================================================
-# Metrics
+# Model builders
 # =========================================================
-
-def build_metrics() -> list[tf.keras.metrics.Metric]:
-    return [
-        tf.keras.metrics.SparseCategoricalAccuracy(name="accuracy"),
-    ]
-
-
-# =========================================================
-# Input / preprocess blokkok
-# =========================================================
-
-def build_input_block(image_size: tuple[int, int] = IMAGE_SIZE):
-    """
-    A dataloader 1 csatornás képet ad.
-    A pretrained ImageNet backbone-okhoz 3 csatornára alakítjuk
-    kizárólag built-in Keras rétegekkel, hogy a modell jól
-    sorosítható / visszatölthető legyen.
-    """
-    inputs = tf.keras.Input(
-        shape=(image_size[0], image_size[1], 1),
-        name="image_input",
-    )
-
-    # [H, W, 1] -> [H, W, 3]
-    x = tf.keras.layers.Concatenate(axis=-1, name="gray_to_rgb")(
-        [inputs, inputs, inputs]
-    )
-
-    return inputs, x
-
-
-def apply_resnet_vgg_preprocess(
-    x: tf.Tensor,
-    name_prefix: str,
-) -> tf.Tensor:
-    """
-    ResNet50 / VGG16 preprocess_input built-in rétegekkel,
-    Lambda nélkül.
-
-    Mivel a bemenetünk grayscale-ből 3 azonos csatornára másolt kép,
-    az RGB->BGR csatornacsere nem változtat a pixeleken.
-    Így elég:
-      1) [0,1] -> [0,255]
-      2) csatornánként mean kivonás
-    """
-    x = tf.keras.layers.Rescaling(
-        scale=255.0,
-        name=f"{name_prefix}_scale255",
-    )(x)
-
-    # Caffe-style mean subtraction
-    mean = [103.939, 116.779, 123.68]
-    variance = [1.0, 1.0, 1.0]
-
-    x = tf.keras.layers.Normalization(
-        mean=mean,
-        variance=variance,
-        axis=-1,
-        name=f"{name_prefix}_mean_subtract",
-    )(x)
-
-    return x
-
-
-def apply_efficientnet_preprocess(
-    x: tf.Tensor,
-    name_prefix: str,
-) -> tf.Tensor:
-    """
-    Az EfficientNetB0 Keras modellben a preprocessing a modellen belül van,
-    és [0,255] skálájú inputot vár.
-    A pipeline viszont [0,1]-et ad, ezért itt felszorozzuk 255-re.
-    """
-    x = tf.keras.layers.Rescaling(
-        scale=255.0,
-        name=f"{name_prefix}_scale255",
-    )(x)
-    return x
-
-
-# =========================================================
-# Classifier head
-# =========================================================
-
-def build_classifier_head(
-    x: tf.Tensor,
-    num_classes: int = NUM_CLASSES,
-    dropout: float = 0.30,
-) -> tf.Tensor:
-    x = tf.keras.layers.GlobalAveragePooling2D(name="gap")(x)
-    x = tf.keras.layers.Dropout(dropout, name="dropout")(x)
-    outputs = tf.keras.layers.Dense(
-        num_classes,
-        activation="softmax",
-        name="predictions",
-    )(x)
-    return outputs
-
-
-# =========================================================
-# Modellek
-# =========================================================
-
-def build_resnet50(
-    image_size: tuple[int, int] = IMAGE_SIZE,
-    num_classes: int = NUM_CLASSES,
-    pretrained: bool = True,
-    train_backbone: bool = False,
-    dropout: float = 0.30,
-):
-    inputs, x = build_input_block(image_size)
-    x = apply_resnet_vgg_preprocess(x, name_prefix="resnet50_preprocess")
-
-    backbone = tf.keras.applications.ResNet50(
-        include_top=False,
-        weights="imagenet" if pretrained else None,
-        input_tensor=x,
-    )
-    backbone.trainable = train_backbone
-
-    outputs = build_classifier_head(
-        backbone.output,
-        num_classes=num_classes,
-        dropout=dropout,
-    )
-    model = tf.keras.Model(
-        inputs=inputs,
-        outputs=outputs,
-        name="resnet50_classifier",
-    )
-    return model, backbone
-
-
-def build_vgg16(
-    image_size: tuple[int, int] = IMAGE_SIZE,
-    num_classes: int = NUM_CLASSES,
-    pretrained: bool = True,
-    train_backbone: bool = False,
-    dropout: float = 0.30,
-):
-    inputs, x = build_input_block(image_size)
-    x = apply_resnet_vgg_preprocess(x, name_prefix="vgg16_preprocess")
-
-    backbone = tf.keras.applications.VGG16(
-        include_top=False,
-        weights="imagenet" if pretrained else None,
-        input_tensor=x,
-    )
-    backbone.trainable = train_backbone
-
-    outputs = build_classifier_head(
-        backbone.output,
-        num_classes=num_classes,
-        dropout=dropout,
-    )
-    model = tf.keras.Model(
-        inputs=inputs,
-        outputs=outputs,
-        name="vgg16_classifier",
-    )
-    return model, backbone
-
-
-def build_efficientnetb0(
-    image_size: tuple[int, int] = IMAGE_SIZE,
-    num_classes: int = NUM_CLASSES,
-    pretrained: bool = True,
-    train_backbone: bool = False,
-    dropout: float = 0.30,
-):
-    inputs, x = build_input_block(image_size)
-    x = apply_efficientnet_preprocess(x, name_prefix="efficientnetb0_preprocess")
-
-    backbone = tf.keras.applications.EfficientNetB0(
-        include_top=False,
-        weights="imagenet" if pretrained else None,
-        input_tensor=x,
-    )
-    backbone.trainable = train_backbone
-
-    outputs = build_classifier_head(
-        backbone.output,
-        num_classes=num_classes,
-        dropout=dropout,
-    )
-    model = tf.keras.Model(
-        inputs=inputs,
-        outputs=outputs,
-        name="efficientnetb0_classifier",
-    )
-    return model, backbone
-
 
 def build_baseline_cnn(
-    image_size: tuple[int, int] = IMAGE_SIZE,
+    input_shape: tuple[int, int, int] = (224, 224, 1),
     num_classes: int = NUM_CLASSES,
-):
-    inputs = tf.keras.Input(
-        shape=(image_size[0], image_size[1], 1),
-        name="image_input",
-    )
+) -> tf.keras.Model:
+    inputs = tf.keras.Input(shape=input_shape)
 
     x = tf.keras.layers.Conv2D(32, 3, padding="same", activation="relu")(inputs)
-    x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.MaxPooling2D()(x)
 
     x = tf.keras.layers.Conv2D(64, 3, padding="same", activation="relu")(x)
-    x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.MaxPooling2D()(x)
 
     x = tf.keras.layers.Conv2D(128, 3, padding="same", activation="relu")(x)
-    x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.MaxPooling2D()(x)
 
     x = tf.keras.layers.Conv2D(256, 3, padding="same", activation="relu")(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
-    x = tf.keras.layers.Dropout(0.30)(x)
-    outputs = tf.keras.layers.Dense(
-        num_classes,
-        activation="softmax",
-        name="predictions",
-    )(x)
 
-    model = tf.keras.Model(inputs=inputs, outputs=outputs, name="baseline_cnn")
-    backbone = None
-    return model, backbone
+    x = tf.keras.layers.Dropout(0.3)(x)
+    x = tf.keras.layers.Dense(128, activation="relu")(x)
+    x = tf.keras.layers.Dropout(0.2)(x)
+
+    outputs = tf.keras.layers.Dense(num_classes, activation="softmax")(x)
+
+    return tf.keras.Model(inputs, outputs, name="baseline_cnn")
+
+
+def build_transfer_model(
+    model_name: str,
+    input_shape: tuple[int, int, int] = (224, 224, 1),
+    num_classes: int = NUM_CLASSES,
+    pretrained: bool = True,
+) -> tuple[tf.keras.Model, tf.keras.Model]:
+    name = model_name.lower()
+
+    base_weights = "imagenet" if pretrained else None
+
+    rgb_input = tf.keras.Input(shape=input_shape, name="grayscale_input")
+    x = tf.keras.layers.Concatenate()([rgb_input, rgb_input, rgb_input])
+
+    if name == "resnet50":
+        preprocess = tf.keras.applications.resnet50.preprocess_input
+        base_model = tf.keras.applications.ResNet50(
+            include_top=False,
+            weights=base_weights,
+            input_shape=(input_shape[0], input_shape[1], 3),
+        )
+    elif name == "vgg16":
+        preprocess = tf.keras.applications.vgg16.preprocess_input
+        base_model = tf.keras.applications.VGG16(
+            include_top=False,
+            weights=base_weights,
+            input_shape=(input_shape[0], input_shape[1], 3),
+        )
+    elif name == "efficientnetb0":
+        preprocess = tf.keras.applications.efficientnet.preprocess_input
+        base_model = tf.keras.applications.EfficientNetB0(
+            include_top=False,
+            weights=base_weights,
+            input_shape=(input_shape[0], input_shape[1], 3),
+        )
+    else:
+        raise ValueError(f"Unsupported model_name: {model_name}")
+
+    y = tf.keras.layers.Lambda(preprocess, name="preprocess_input")(x)
+    y = base_model(y, training=False)
+    y = tf.keras.layers.GlobalAveragePooling2D()(y)
+    y = tf.keras.layers.Dropout(0.3)(y)
+    y = tf.keras.layers.Dense(256, activation="relu")(y)
+    y = tf.keras.layers.Dropout(0.2)(y)
+    outputs = tf.keras.layers.Dense(num_classes, activation="softmax")(y)
+
+    model = tf.keras.Model(rgb_input, outputs, name=name)
+    return model, base_model
 
 
 def build_model(
-    model_name: str = "resnet50",
-    image_size: tuple[int, int] = IMAGE_SIZE,
+    model_name: str,
+    input_shape: tuple[int, int, int] = (224, 224, 1),
     num_classes: int = NUM_CLASSES,
     pretrained: bool = True,
-    train_backbone: bool = False,
-):
-    model_name = model_name.lower().strip()
+) -> tuple[tf.keras.Model, tf.keras.Model | None]:
+    name = model_name.lower()
 
-    if model_name == "resnet50":
-        return build_resnet50(
-            image_size=image_size,
-            num_classes=num_classes,
-            pretrained=pretrained,
-            train_backbone=train_backbone,
-        )
+    if name == "baseline_cnn":
+        return build_baseline_cnn(input_shape=input_shape, num_classes=num_classes), None
 
-    if model_name == "vgg16":
-        return build_vgg16(
-            image_size=image_size,
-            num_classes=num_classes,
-            pretrained=pretrained,
-            train_backbone=train_backbone,
-        )
-
-    if model_name == "efficientnetb0":
-        return build_efficientnetb0(
-            image_size=image_size,
-            num_classes=num_classes,
-            pretrained=pretrained,
-            train_backbone=train_backbone,
-        )
-
-    if model_name == "baseline_cnn":
-        return build_baseline_cnn(
-            image_size=image_size,
-            num_classes=num_classes,
-        )
-
-    raise ValueError(
-        f"Ismeretlen model_name: {model_name}. "
-        "Lehetséges értékek: resnet50, vgg16, efficientnetb0, baseline_cnn"
+    return build_transfer_model(
+        model_name=name,
+        input_shape=input_shape,
+        num_classes=num_classes,
+        pretrained=pretrained,
     )
 
 
@@ -310,147 +127,91 @@ def build_model(
 # Compile / callbacks
 # =========================================================
 
-def compile_model(
-    model: tf.keras.Model,
-    learning_rate: float = 1e-3,
-) -> tf.keras.Model:
+def compile_model(model: tf.keras.Model, learning_rate: float) -> None:
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
-        loss=tf.keras.losses.SparseCategoricalCrossentropy(),
-        metrics=build_metrics(),
-        jit_compile=False,
+        loss="sparse_categorical_crossentropy",
+        metrics=[
+            "accuracy",
+            tf.keras.metrics.Recall(name="recall"),
+        ],
     )
-    return model
 
 
-def build_callbacks(
-    out_dir: str | Path,
-    monitor: str = "val_accuracy",
-    early_stopping_patience: int = 4,
-    reduce_lr_patience: int = 2,
-):
+def build_callbacks(out_dir: str | Path) -> list[tf.keras.callbacks.Callback]:
     out_dir = Path(out_dir)
-    callbacks: list[tf.keras.callbacks.Callback] = []
 
-    callbacks.append(
-        tf.keras.callbacks.EarlyStopping(
-            monitor=monitor,
-            mode="max",
-            patience=early_stopping_patience,
-            restore_best_weights=True,
-            verbose=1,
-        )
-    )
-
-    callbacks.append(
-        tf.keras.callbacks.ReduceLROnPlateau(
-            monitor=monitor,
-            mode="max",
-            factor=0.5,
-            patience=reduce_lr_patience,
-            min_lr=1e-6,
-            verbose=1,
-        )
-    )
-
-    callbacks.append(
+    return [
         tf.keras.callbacks.ModelCheckpoint(
             filepath=str(out_dir / "best_model.keras"),
-            monitor=monitor,
+            monitor="val_accuracy",
             mode="max",
             save_best_only=True,
-            save_weights_only=False,
             verbose=1,
-        )
-    )
-
-    callbacks.append(
-        tf.keras.callbacks.CSVLogger(
-            filename=str(out_dir / "history.csv"),
-            separator=",",
-            append=False,
-        )
-    )
-
-    return callbacks
-
-
-# =========================================================
-# Fine-tune helper
-# =========================================================
-
-def unfreeze_top_layers(
-    backbone: tf.keras.Model | None,
-    fraction: float = 0.20,
-) -> int:
-    """
-    A backbone felső részét kinyitja fine-tuninghoz.
-    """
-    if backbone is None:
-        return 0
-
-    layers = backbone.layers
-    n_total = len(layers)
-    n_unfreeze = max(1, int(round(n_total * fraction)))
-    split_idx = n_total - n_unfreeze
-
-    backbone.trainable = True
-
-    for i, layer in enumerate(layers):
-        layer.trainable = i >= split_idx
-
-    return n_unfreeze
-
-
-# =========================================================
-# History / metrics mentés
-# =========================================================
-
-def save_history(history: tf.keras.callbacks.History, out_dir: str | Path) -> None:
-    out_dir = Path(out_dir)
-
-    hist_df = pd.DataFrame(history.history)
-    hist_df.to_csv(out_dir / "history_epochwise.csv", index=False)
-
-    history_json = {
-        key: [float(v) for v in values]
-        for key, values in history.history.items()
-    }
-    save_json(history_json, out_dir / "history.json")
-
-
-def evaluate_and_save(
-    model: tf.keras.Model,
-    train_ds,
-    val_ds,
-    test_ds,
-    out_dir: str | Path,
-) -> dict[str, dict[str, float]]:
-    out_dir = Path(out_dir)
-
-    train_metrics = model.evaluate(train_ds, verbose=0, return_dict=True)
-    val_metrics = model.evaluate(val_ds, verbose=0, return_dict=True)
-    test_metrics = model.evaluate(test_ds, verbose=0, return_dict=True)
-
-    metrics = {
-        "train": {k: float(v) for k, v in train_metrics.items()},
-        "val": {k: float(v) for k, v in val_metrics.items()},
-        "test": {k: float(v) for k, v in test_metrics.items()},
-    }
-
-    save_json(metrics, out_dir / "metrics.json")
-    return metrics
-
-
-def is_training_complete(model_out_dir: str | Path) -> bool:
-    model_out_dir = Path(model_out_dir)
-
-    required_files = [
-        model_out_dir / "final_model.keras",
-        model_out_dir / "metrics.json",
-        model_out_dir / "training_config.json",
+        ),
+        tf.keras.callbacks.EarlyStopping(
+            monitor="val_accuracy",
+            mode="max",
+            patience=5,
+            restore_best_weights=True,
+            verbose=1,
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss",
+            factor=0.5,
+            patience=2,
+            min_lr=1e-7,
+            verbose=1,
+        ),
+        tf.keras.callbacks.CSVLogger(str(out_dir / "history.csv")),
     ]
-    return all(p.exists() for p in required_files)
+
+
+# =========================================================
+# Plot helpers
+# =========================================================
+
+def plot_training_history(
+    history_df: pd.DataFrame,
+    save_path: str | Path,
+    title: str,
+) -> None:
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+
+    # loss
+    axes[0].plot(history_df["loss"], label="train")
+    if "val_loss" in history_df.columns:
+        axes[0].plot(history_df["val_loss"], label="val")
+    axes[0].set_title("Loss")
+    axes[0].set_xlabel("Epoch")
+    axes[0].grid(True, alpha=0.3)
+    axes[0].legend()
+
+    # accuracy
+    if "accuracy" in history_df.columns:
+        axes[1].plot(history_df["accuracy"], label="train")
+    if "val_accuracy" in history_df.columns:
+        axes[1].plot(history_df["val_accuracy"], label="val")
+    axes[1].set_title("Accuracy")
+    axes[1].set_xlabel("Epoch")
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend()
+
+    # recall
+    if "recall" in history_df.columns:
+        axes[2].plot(history_df["recall"], label="train")
+    if "val_recall" in history_df.columns:
+        axes[2].plot(history_df["val_recall"], label="val")
+    axes[2].set_title("Recall")
+    axes[2].set_xlabel("Epoch")
+    axes[2].grid(True, alpha=0.3)
+    axes[2].legend()
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
+    plt.close(fig)
+
 
 # =========================================================
 # Training
@@ -459,91 +220,63 @@ def is_training_complete(model_out_dir: str | Path) -> bool:
 def run_training(
     split_dir: str | Path,
     out_dir: str | Path = MODELS_DIR,
-    model_name: str = "resnet50",
-    image_size: tuple[int, int] = IMAGE_SIZE,
-    batch_size: int = BATCH_SIZE,
-    seed: int = SEED,
+    model_name: str = "baseline_cnn",
     pretrained: bool = True,
-    train_backbone: bool = False,
     do_fine_tuning: bool = False,
-    fine_tune_fraction: float = 0.20,
-    epochs_head: int = 8,
+    epochs_head: int = NUM_EPOCHS_DEFAULT,
     epochs_finetune: int = 5,
     learning_rate_head: float = 1e-3,
     learning_rate_finetune: float = 1e-5,
-):
-    set_global_seed(seed)
+    data_root: str | Path | None = None,
+    data_variant: str = "raw",
+    batch_size: int = BATCH_SIZE,
+    image_size: tuple[int, int] = IMAGE_SIZE,
+) -> dict[str, Any]:
+    set_global_seed(SEED)
 
-    out_dir = Path(out_dir) / model_name.lower()
-    ensure_dir(out_dir)
+    if data_root is None:
+        data_root = get_data_root(data_variant)
+    data_root = Path(data_root)
 
-    # -----------------------------------------------------
-    # Datasetek
-    # -----------------------------------------------------
-    train_ds, val_ds, test_ds, train_df, val_df, test_df = build_datasets_from_split_csvs(
+    model_out_dir = ensure_dir(Path(out_dir) / f"{model_name}_{data_variant}")
+
+    print("=" * 72)
+    print("TRAINING")
+    print("=" * 72)
+    print("model_name   :", model_name)
+    print("data_variant :", data_variant)
+    print("data_root    :", data_root)
+    print("split_dir    :", Path(split_dir))
+    print("out_dir      :", model_out_dir)
+    print("pretrained   :", pretrained)
+    print("fine_tuning  :", do_fine_tuning)
+    print("=" * 72)
+
+    augmentation = build_default_augmentation()
+
+    train_ds, val_ds, test_ds = build_datasets_from_split_csvs(
         split_dir=split_dir,
-        image_size=image_size,
+        data_root=data_root,
         batch_size=batch_size,
-        seed=seed,
-    )
-    
-    # -----------------------------------------------------
-    # Speed test
-    # -----------------------------------------------------
-    import time
-    print("\n[INFO] Dataset quick check...")
-    t0 = time.time()
-    for i, (x, y) in enumerate(train_ds.take(3)):
-        print(f"  batch {i}: x={x.shape}, y={y.shape}")
-    print(f"[INFO] 3 batch load time: {time.time() - t0:.2f} sec")
-
-    
-    # -----------------------------------------------------
-    # Modell
-    # -----------------------------------------------------
-    model, backbone = build_model(
-        model_name=model_name,
+        augment_fn=augmentation,
+        cache=False,
         image_size=image_size,
+        channels=1,
+    )
+
+    model, base_model = build_model(
+        model_name=model_name,
+        input_shape=(image_size[0], image_size[1], 1),
         num_classes=NUM_CLASSES,
         pretrained=pretrained,
-        train_backbone=train_backbone,
     )
 
-    model = compile_model(model, learning_rate=learning_rate_head)
+    if base_model is not None:
+        base_model.trainable = False
 
-    config_snapshot = {
-        "model_name": model_name,
-        "image_size": [int(image_size[0]), int(image_size[1])],
-        "batch_size": int(batch_size),
-        "seed": int(seed),
-        "num_classes": int(NUM_CLASSES),
-        "class_names": get_class_names(),
-        "pretrained": bool(pretrained),
-        "train_backbone": bool(train_backbone),
-        "do_fine_tuning": bool(do_fine_tuning),
-        "fine_tune_fraction": float(fine_tune_fraction),
-        "epochs_head": int(epochs_head),
-        "epochs_finetune": int(epochs_finetune),
-        "learning_rate_head": float(learning_rate_head),
-        "learning_rate_finetune": float(learning_rate_finetune),
-        "split_dir": str(split_dir),
-        "dataset_sizes": {
-            "train": int(len(train_df)),
-            "val": int(len(val_df)),
-            "test": int(len(test_df)),
-        },
-    }
-    save_json(config_snapshot, out_dir / "training_config.json")
+    compile_model(model, learning_rate=learning_rate_head)
 
-    # -----------------------------------------------------
-    # Phase 1: head training
-    # -----------------------------------------------------
-    print("\n" + "=" * 80)
-    print(f"TRAINING START: {model_name}")
-    print("=" * 80)
-    model.summary()
-
-    callbacks = build_callbacks(out_dir=out_dir, monitor="val_accuracy")
+    callbacks = build_callbacks(model_out_dir)
 
     history_head = model.fit(
         train_ds,
@@ -553,177 +286,57 @@ def run_training(
         verbose=1,
     )
 
-    all_history = dict(history_head.history)
+    history_frames = [pd.DataFrame(history_head.history)]
+    history_frames[0]["phase"] = "head"
 
-    # -----------------------------------------------------
-    # Phase 2: fine tuning opcionálisan
-    # -----------------------------------------------------
-    if do_fine_tuning and backbone is not None:
-        print("\n" + "=" * 80)
-        print("FINE-TUNING PHASE")
-        print("=" * 80)
+    if do_fine_tuning and base_model is not None and epochs_finetune > 0:
+        base_model.trainable = True
 
-        n_unfrozen = unfreeze_top_layers(backbone, fraction=fine_tune_fraction)
-        print(f"[INFO] Unfrozen top layers: {n_unfrozen}")
-
-        model = compile_model(model, learning_rate=learning_rate_finetune)
-
-        fine_tune_callbacks = build_callbacks(
-            out_dir=out_dir,
-            monitor="val_accuracy",
-        )
+        compile_model(model, learning_rate=learning_rate_finetune)
 
         history_ft = model.fit(
             train_ds,
             validation_data=val_ds,
             epochs=epochs_head + epochs_finetune,
-            initial_epoch=len(history_head.history["loss"]),
-            callbacks=fine_tune_callbacks,
+            initial_epoch=epochs_head,
+            callbacks=callbacks,
             verbose=1,
         )
 
-        for key, values in history_ft.history.items():
-            if key in all_history:
-                all_history[key].extend(values)
-            else:
-                all_history[key] = list(values)
+        ft_df = pd.DataFrame(history_ft.history)
+        ft_df["phase"] = "finetune"
+        history_frames.append(ft_df)
 
-    # -----------------------------------------------------
-    # Mentések
-    # -----------------------------------------------------
-    final_model_path = out_dir / "final_model.keras"
+    history_df = pd.concat(history_frames, ignore_index=True)
+    history_df.to_csv(model_out_dir / "history_full.csv", index=False)
+
+    plot_training_history(
+        history_df=history_df,
+        save_path=model_out_dir / "training_history.png",
+        title=f"Training history - {model_name} ({data_variant})",
+    )
+
+    best_model_path = model_out_dir / "best_model.keras"
+    final_model_path = model_out_dir / "last_model.keras"
+
     model.save(final_model_path)
 
-    save_json({"class_names": get_class_names()}, out_dir / "class_names.json")
-
-    history_obj = type("HistoryObj", (), {"history": all_history})()
-    save_history(history_obj, out_dir)
-
-    metrics = evaluate_and_save(model, train_ds, val_ds, test_ds, out_dir)
-
-    print("\nFinal metrics:")
-    print(json.dumps(metrics, indent=2, ensure_ascii=False))
-
-    return {
-        "model": model,
-        "train_ds": train_ds,
-        "val_ds": val_ds,
-        "test_ds": test_ds,
-        "train_df": train_df,
-        "val_df": val_df,
-        "test_df": test_df,
-        "metrics": metrics,
-        "out_dir": out_dir,
-        "best_model_path": out_dir / "best_model.keras",
-        "final_model_path": final_model_path,
-        "history_csv": out_dir / "history.csv",
-        "history_json": out_dir / "history.json",
-        "metrics_json": out_dir / "metrics.json",
-        "config_json": out_dir / "training_config.json",
+    summary = {
+        "model_name": model_name,
+        "data_variant": data_variant,
+        "data_root": str(data_root),
+        "split_dir": str(Path(split_dir)),
+        "out_dir": str(model_out_dir),
+        "best_model_path": str(best_model_path),
+        "last_model_path": str(final_model_path),
+        "class_names": get_class_names(),
+        "pretrained": bool(pretrained),
+        "do_fine_tuning": bool(do_fine_tuning),
+        "epochs_head": int(epochs_head),
+        "epochs_finetune": int(epochs_finetune),
+        "learning_rate_head": float(learning_rate_head),
+        "learning_rate_finetune": float(learning_rate_finetune),
     }
+    save_json(summary, model_out_dir / "train_summary.json")
 
-
-# =========================================================
-# Több modell futtatása összehasonlításhoz
-# =========================================================
-
-def run_multiple_models(
-    split_dir: str | Path,
-    out_dir: str | Path = MODELS_DIR,
-    model_names: list[str] | tuple[str, ...] = (
-        "resnet50",
-        "vgg16",
-        "efficientnetb0",
-    ),
-    image_size: tuple[int, int] = IMAGE_SIZE,
-    batch_size: int = BATCH_SIZE,
-    seed: int = SEED,
-    pretrained: bool = True,
-    do_fine_tuning: bool = False,
-    fine_tune_fraction: float = 0.20,
-    epochs_head: int = 8,
-    epochs_finetune: int = 5,
-    learning_rate_head: float = 1e-3,
-    learning_rate_finetune: float = 1e-5,
-) -> pd.DataFrame:
-    rows = []
-
-    for model_name in model_names:
-        model_dir = Path(out_dir) / model_name.lower()
-        if is_training_complete(model_dir):
-            print(f"[SKIP] {model_name} already completed: {model_dir}")
-
-            metrics_path = model_dir / "metrics.json"
-            if metrics_path.exists():
-                with open(metrics_path, "r", encoding="utf-8") as f:
-                    saved_metrics = json.load(f)
-                row = {
-                    "model_name": model_name,
-                    "train_loss": saved_metrics["train"]["loss"],
-                    "train_accuracy": saved_metrics["train"]["accuracy"],
-                    "val_loss": saved_metrics["val"]["loss"],
-                    "val_accuracy": saved_metrics["val"]["accuracy"],
-                    "test_loss": saved_metrics["test"]["loss"],
-                    "test_accuracy": saved_metrics["test"]["accuracy"],
-                    "out_dir": str(model_dir),
-                }
-                rows.append(row)
-            continue
-        
-        result = run_training(
-            split_dir=split_dir,
-            out_dir=out_dir,
-            model_name=model_name,
-            image_size=image_size,
-            batch_size=batch_size,
-            seed=seed,
-            pretrained=pretrained,
-            train_backbone=False,
-            do_fine_tuning=do_fine_tuning,
-            fine_tune_fraction=fine_tune_fraction,
-            epochs_head=epochs_head,
-            epochs_finetune=epochs_finetune,
-            learning_rate_head=learning_rate_head,
-            learning_rate_finetune=learning_rate_finetune,
-        )
-
-        row = {
-            "model_name": model_name,
-            "train_loss": result["metrics"]["train"]["loss"],
-            "train_accuracy": result["metrics"]["train"]["accuracy"],
-            "val_loss": result["metrics"]["val"]["loss"],
-            "val_accuracy": result["metrics"]["val"]["accuracy"],
-            "test_loss": result["metrics"]["test"]["loss"],
-            "test_accuracy": result["metrics"]["test"]["accuracy"],
-            "out_dir": str(result["out_dir"]),
-        }
-        rows.append(row)
-
-    comparison_df = (
-        pd.DataFrame(rows)
-        .sort_values("val_accuracy", ascending=False)
-        .reset_index(drop=True)
-    )
-
-    comparison_dir = ensure_dir(Path(out_dir))
-    comparison_path = comparison_dir / "model_comparison.csv"
-    comparison_df.to_csv(comparison_path, index=False)
-
-    print(f"[INFO] Saved comparison table: {comparison_path}")
-    print(comparison_df)
-
-    return comparison_df
-
-
-# =========================================================
-# Main
-# =========================================================
-
-if __name__ == "__main__":
-    run_training(
-        split_dir=SPLITS_DIR,
-        out_dir=MODELS_DIR,
-        model_name="resnet50",
-        pretrained=True,
-        do_fine_tuning=False,
-    )
+    return summary
