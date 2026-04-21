@@ -443,14 +443,23 @@ def build_datasets_from_split_csvs(
 # Egyszerű sanity check
 # =========================================================
 
-def inspect_batch(ds, n_classes: int | None = None, sample_size: int = 16) -> None:
+def inspect_batch(
+    ds,
+    n_classes: int | None = None,
+    sample_size: int = 16,
+    shuffle_buffer: int = 5000,
+) -> None:
     """
-    Egy véletlenszerű batch-et vizsgál meg, és abból random label mintát ír ki.
+    Valóban random rekordokat vesz a TELJES datasetből
     """
-    shuffle_buffer = 5000
-    ds = ds.shuffle(shuffle_buffer, reshuffle_each_iteration=True)
-    
-    for images, labels in ds.take(1):
+    sampled = (
+        ds.unbatch()
+        .shuffle(shuffle_buffer, reshuffle_each_iteration=True)
+        .take(sample_size)
+        .batch(sample_size)
+    )
+
+    for images, labels in sampled.take(1):
         batch_size = images.shape[0]
 
         print(f"images shape: {images.shape}")
