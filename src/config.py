@@ -35,8 +35,8 @@ if IS_COLAB:
     DATA_DIR = Path("/content/drive/MyDrive/CXR/data")
     OUTPUT_DIR = Path("/content/drive/MyDrive/CXR/outputs")
 else:
-    DATA_DIR = PROJECT_DIR / "data"
-    OUTPUT_DIR = PROJECT_DIR / "outputs"
+    DATA_DIR = PROJECT_ROOT / "data"
+    OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
 RAW_DIR = DATA_DIR / "raw"
 INTERIM_DIR = DATA_DIR / "interim"
