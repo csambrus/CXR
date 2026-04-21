@@ -654,7 +654,7 @@ def run_multiple_models(
             print(f"[SKIP] {model_name} already completed: {model_dir}")
 
             metrics_path = model_dir / "metrics.json"
-            if m   etrics_path.exists():
+            if metrics_path.exists():
                 with open(metrics_path, "r", encoding="utf-8") as f:
                     saved_metrics = json.load(f)
                 row = {
