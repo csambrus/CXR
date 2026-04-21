@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,249 +22,210 @@ from src.config import (
     BATCH_SIZE,
     IMAGE_SIZE,
     NUM_CLASSES,
-    SEED,
-    SPLITS_DIR,
-    MODELS_DIR,
-    OUTPUT_DIR,
+    PLOT_DPI,
     ensure_dir,
     get_class_names,
+    get_data_root,
     save_json,
 )
 from src.dataloader import build_datasets_from_split_csvs
 
 
 # =========================================================
-# util
+# Core prediction helpers
 # =========================================================
 
-def load_gray_image(
-    path: str | Path,
-    target_size: tuple[int, int] | None = None,
-) -> np.ndarray:
-    img = tf.io.read_file(str(path))
-    img = tf.io.decode_image(img, channels=1, expand_animations=False)
-    img = tf.image.convert_image_dtype(img, tf.float32)
+def collect_predictions(
+    model: tf.keras.Model,
+    dataset: tf.data.Dataset,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    y_true_all = []
+    y_prob_all = []
 
-    if target_size is not None:
-        img = tf.image.resize(img, target_size, method="bilinear", antialias=True)
+    for x_batch, y_batch in dataset:
+        prob = model.predict(x_batch, verbose=0)
+        y_true_all.append(y_batch.numpy())
+        y_prob_all.append(prob)
 
-    return img.numpy()
+    y_true = np.concatenate(y_true_all, axis=0)
+    y_prob = np.concatenate(y_prob_all, axis=0)
+    y_pred = np.argmax(y_prob, axis=1)
 
+    return y_true, y_pred, y_prob
 
-def infer_model_name(model_path: str | Path) -> str:
-    model_path = Path(model_path)
-
-    if model_path.name == "best_model.keras":
-        return model_path.parent.name
-
-    return model_path.stem
-
-
-# =========================================================
-# prediction
-# =========================================================
-
-def collect_predictions(model, dataset):
-    y_true: list[int] = []
-    y_pred: list[int] = []
-    y_prob: list[list[float]] = []
-
-    for images, labels in dataset:
-        probs = model.predict(images, verbose=0)
-        preds = np.argmax(probs, axis=1)
-
-        y_true.extend(labels.numpy().tolist())
-        y_pred.extend(preds.tolist())
-        y_prob.extend(probs.tolist())
-
-    return np.array(y_true), np.array(y_pred), np.array(y_prob)
-
-
-# =========================================================
-# metrics
-# =========================================================
 
 def compute_metrics(
+    loss: float,
     y_true: np.ndarray,
     y_pred: np.ndarray,
-    *,
-    loss: float | None = None,
-    y_prob: np.ndarray | None = None,
-    num_classes: int | None = None,
+    y_prob: np.ndarray,
+    num_classes: int,
 ) -> dict[str, float]:
-    metrics: dict[str, float] = {}
+    accuracy = accuracy_score(y_true, y_pred)
+    recall_macro = recall_score(y_true, y_pred, average="macro", zero_division=0)
+    f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
 
-    metrics["accuracy"] = float(accuracy_score(y_true, y_pred))
-    metrics["recall_macro"] = float(
-        recall_score(y_true, y_pred, average="macro", zero_division=0)
-    )
-    metrics["f1_macro"] = float(
-        f1_score(y_true, y_pred, average="macro", zero_division=0)
-    )
-
-    if loss is not None:
-        metrics["loss"] = float(loss)
-
-    if y_prob is not None and num_classes is not None:
-        try:
-            y_true_bin = label_binarize(y_true, classes=np.arange(num_classes))
-            auc = roc_auc_score(
-                y_true_bin,
-                y_prob,
-                multi_class="ovr",
-                average="macro",
-            )
-            metrics["roc_auc_macro_ovr"] = float(auc)
-        except Exception:
-            metrics["roc_auc_macro_ovr"] = float("nan")
-
-    return metrics
-
-
-# =========================================================
-# plots
-# =========================================================
-
-def plot_metrics_row(
-    loss: float,
-    accuracy: float,
-    recall: float,
-    f1: float,
-    save_path: str | Path | None = None,
-):
-    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
-
-    titles = ["Loss", "Accuracy", "Recall (macro)", "F1 (macro)"]
-    values = [loss, accuracy, recall, f1]
-
-    for ax, title, value in zip(axes, titles, values):
-        ax.bar([0], [value])
-        ax.set_title(title)
-        ax.set_xticks([])
-
-        if title == "Loss":
-            upper = max(1.0, value * 1.2)
-            ax.set_ylim(0, upper)
-        else:
-            ax.set_ylim(0, 1.0)
-
-        ax.text(
-            0,
-            value,
-            f"{value:.4f}",
-            ha="center",
-            va="bottom",
-            fontsize=12,
+    roc_auc_macro_ovr = np.nan
+    try:
+        y_true_bin = label_binarize(y_true, classes=np.arange(num_classes))
+        roc_auc_macro_ovr = roc_auc_score(
+            y_true_bin,
+            y_prob,
+            multi_class="ovr",
+            average="macro",
         )
+    except Exception:
+        pass
 
-    plt.tight_layout()
+    return {
+        "loss": float(loss),
+        "accuracy": float(accuracy),
+        "recall_macro": float(recall_macro),
+        "f1_macro": float(f1_macro),
+        "roc_auc_macro_ovr": float(roc_auc_macro_ovr),
+    }
 
-    if save_path:
-        save_path = Path(save_path)
-        ensure_dir(save_path.parent)
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
 
-    plt.show()
+# =========================================================
+# Plot helpers
+# =========================================================
 
-
-def plot_evaluation_row(
-    cm: np.ndarray,
+def plot_confusion_and_roc_row(
     y_true: np.ndarray,
+    y_pred: np.ndarray,
     y_prob: np.ndarray,
     class_names: list[str],
-    save_path: str | Path | None = None,
+    model_name: str,
+    save_path: str | Path,
 ):
-    cm_raw = cm.astype(np.float64)
+    cm = confusion_matrix(y_true, y_pred)
+    cm_norm = confusion_matrix(y_true, y_pred, normalize="true")
 
-    row_sums = cm_raw.sum(axis=1, keepdims=True)
-    cm_norm = np.divide(
-        cm_raw,
-        row_sums,
-        out=np.zeros_like(cm_raw),
-        where=row_sums != 0,
-    )
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-    y_true_bin = label_binarize(y_true, classes=np.arange(len(class_names)))
+    # -----------------------------------------------------
+    # confusion matrix
+    # -----------------------------------------------------
+    im0 = axes[0].imshow(cm, interpolation="nearest", cmap="Blues")
+    axes[0].set_title("Confusion Matrix")
+    axes[0].set_xticks(np.arange(len(class_names)))
+    axes[0].set_yticks(np.arange(len(class_names)))
+    axes[0].set_xticklabels(class_names, rotation=45, ha="right")
+    axes[0].set_yticklabels(class_names)
+    axes[0].set_xlabel("Predicted")
+    axes[0].set_ylabel("True")
 
-    fig, axes = plt.subplots(1, 3, figsize=(21, 6))
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            axes[0].text(
+                j, i, f"{cm[i, j]}",
+                ha="center", va="center"
+            )
+    fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
 
-    # -------------------------------------------------
-    # 1) Confusion matrix
-    # -------------------------------------------------
-    ax = axes[0]
-    im0 = ax.imshow(cm_raw)
-    ax.set_title("Confusion Matrix")
-    ax.set_xlabel("Predicted label")
-    ax.set_ylabel("True label")
-    ax.set_xticks(np.arange(len(class_names)))
-    ax.set_yticks(np.arange(len(class_names)))
-    ax.set_xticklabels(class_names, rotation=45, ha="right")
-    ax.set_yticklabels(class_names)
-
-    for i in range(cm_raw.shape[0]):
-        for j in range(cm_raw.shape[1]):
-            ax.text(j, i, f"{int(cm_raw[i, j])}", ha="center", va="center")
-
-    fig.colorbar(im0, ax=ax, fraction=0.046, pad=0.04)
-
-    # -------------------------------------------------
-    # 2) Normalized confusion matrix
-    # -------------------------------------------------
-    ax = axes[1]
-    im1 = ax.imshow(cm_norm)
-    ax.set_title("Confusion Matrix (Normalized)")
-    ax.set_xlabel("Predicted label")
-    ax.set_ylabel("True label")
-    ax.set_xticks(np.arange(len(class_names)))
-    ax.set_yticks(np.arange(len(class_names)))
-    ax.set_xticklabels(class_names, rotation=45, ha="right")
-    ax.set_yticklabels(class_names)
+    # -----------------------------------------------------
+    # normalized confusion matrix
+    # -----------------------------------------------------
+    im1 = axes[1].imshow(cm_norm, interpolation="nearest", cmap="Blues", vmin=0, vmax=1)
+    axes[1].set_title("Normalized Confusion Matrix")
+    axes[1].set_xticks(np.arange(len(class_names)))
+    axes[1].set_yticks(np.arange(len(class_names)))
+    axes[1].set_xticklabels(class_names, rotation=45, ha="right")
+    axes[1].set_yticklabels(class_names)
+    axes[1].set_xlabel("Predicted")
+    axes[1].set_ylabel("True")
 
     for i in range(cm_norm.shape[0]):
         for j in range(cm_norm.shape[1]):
-            ax.text(j, i, f"{cm_norm[i, j]:.2f}", ha="center", va="center")
+            axes[1].text(
+                j, i, f"{cm_norm[i, j]:.2f}",
+                ha="center", va="center"
+            )
+    fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
 
-    fig.colorbar(im1, ax=ax, fraction=0.046, pad=0.04)
+    # -----------------------------------------------------
+    # ROC
+    # -----------------------------------------------------
+    y_true_bin = label_binarize(y_true, classes=np.arange(len(class_names)))
 
-    # -------------------------------------------------
-    # 3) ROC
-    # -------------------------------------------------
-    ax = axes[2]
     for i, class_name in enumerate(class_names):
-        if len(np.unique(y_true_bin[:, i])) < 2:
+        try:
+            fpr, tpr, _ = roc_curve(y_true_bin[:, i], y_prob[:, i])
+            auc_i = roc_auc_score(y_true_bin[:, i], y_prob[:, i])
+            axes[2].plot(fpr, tpr, label=f"{class_name} (AUC={auc_i:.3f})")
+        except Exception:
             continue
 
-        fpr, tpr, _ = roc_curve(y_true_bin[:, i], y_prob[:, i])
-        auc_i = roc_auc_score(y_true_bin[:, i], y_prob[:, i])
-        ax.plot(fpr, tpr, label=f"{class_name} (AUC={auc_i:.3f})")
+    axes[2].plot([0, 1], [0, 1], linestyle="--")
+    axes[2].set_title("ROC Curves")
+    axes[2].set_xlabel("False Positive Rate")
+    axes[2].set_ylabel("True Positive Rate")
+    axes[2].grid(True, alpha=0.3)
+    axes[2].legend(fontsize=8, loc="lower right")
 
-    ax.plot([0, 1], [0, 1], linestyle="--")
-    ax.set_title("Multi-class ROC (one-vs-rest)")
-    ax.set_xlabel("False Positive Rate")
-    ax.set_ylabel("True Positive Rate")
-    ax.legend(loc="lower right")
-
-    plt.tight_layout()
-
-    if save_path:
-        save_path = Path(save_path)
-        ensure_dir(save_path.parent)
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
-
-    plt.show()
+    fig.suptitle(f"===== EVALUATION ===== {model_name}")
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
+    plt.close(fig)
 
 
 # =========================================================
-# reports
+# Evaluation
 # =========================================================
 
-def save_classification_report_files(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    class_names: list[str],
+def run_evaluation(
+    model_path: str | Path,
+    split_dir: str | Path,
     out_dir: str | Path,
-):
-    out_dir = Path(out_dir)
+    model_name: str,
+    data_root: str | Path | None = None,
+    data_variant: str = "raw",
+    batch_size: int = BATCH_SIZE,
+    image_size: tuple[int, int] = IMAGE_SIZE,
+) -> dict[str, Any]:
+    if data_root is None:
+        data_root = get_data_root(data_variant)
+    data_root = Path(data_root)
+
+    eval_out_dir = ensure_dir(Path(out_dir) / f"{model_name}_{data_variant}")
+    class_names = get_class_names()
+
+    print("=" * 72)
+    print(f"===== EVALUATION ===== {model_name}")
+    print("=" * 72)
+    print("model_path   :", Path(model_path))
+    print("split_dir    :", Path(split_dir))
+    print("data_root    :", data_root)
+    print("data_variant :", data_variant)
+    print("out_dir      :", eval_out_dir)
+    print("=" * 72)
+
+    _, _, test_ds = build_datasets_from_split_csvs(
+        split_dir=split_dir,
+        data_root=data_root,
+        batch_size=batch_size,
+        augment_fn=None,
+        cache=False,
+        image_size=image_size,
+        channels=1,
+    )
+
+    model = tf.keras.models.load_model(model_path, safe_mode=False)
+
+    eval_result = model.evaluate(test_ds, verbose=1)
+    if isinstance(eval_result, list):
+        loss = float(eval_result[0])
+    else:
+        loss = float(eval_result)
+
+    y_true, y_pred, y_prob = collect_predictions(model, test_ds)
+    metrics = compute_metrics(
+        loss=loss,
+        y_true=y_true,
+        y_pred=y_pred,
+        y_prob=y_prob,
+        num_classes=NUM_CLASSES,
+    )
 
     report_dict = classification_report(
         y_true,
@@ -273,290 +234,42 @@ def save_classification_report_files(
         output_dict=True,
         zero_division=0,
     )
-    report_text = classification_report(
-        y_true,
-        y_pred,
-        target_names=class_names,
-        digits=4,
-        zero_division=0,
-    )
-
-    save_json(report_dict, out_dir / "classification_report.json")
-
-    with open(out_dir / "classification_report.txt", "w", encoding="utf-8") as f:
-        f.write(report_text)
-
     report_df = pd.DataFrame(report_dict).transpose()
-    report_df.to_csv(out_dir / "classification_report.csv", index=True)
+    report_df.to_csv(eval_out_dir / "classification_report.csv", index=True)
 
-    return report_dict, report_text, report_df
-
-
-# =========================================================
-# misclassified
-# =========================================================
-
-def save_misclassified_examples(
-    test_df: pd.DataFrame,
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    class_names: list[str],
-    out_dir: str | Path,
-    max_examples: int = 12,
-    image_size: tuple[int, int] = IMAGE_SIZE,
-):
-    out_dir = Path(out_dir)
-    mis_dir = ensure_dir(out_dir / "misclassified")
-
-    wrong_idx = np.where(y_true != y_pred)[0]
-
-    if len(wrong_idx) == 0:
-        print("[INFO] No misclassified samples found.")
-        return pd.DataFrame(
-            columns=[
-                "filepath",
-                "true_label",
-                "pred_label",
-                "true_name",
-                "pred_name",
-            ]
-        )
-
-    subset_idx = wrong_idx[:max_examples]
-
-    rows = []
-    n = len(subset_idx)
-    cols = min(4, n)
-    rows_n = int(np.ceil(n / cols))
-
-    fig, axes = plt.subplots(
-        rows_n,
-        cols,
-        figsize=(4 * cols, 4 * rows_n),
-        squeeze=False,
+    pred_df = pd.DataFrame(
+        {
+            "y_true": y_true,
+            "y_pred": y_pred,
+            **{f"prob_{class_names[i]}": y_prob[:, i] for i in range(len(class_names))},
+        }
     )
+    pred_df.to_csv(eval_out_dir / "predictions.csv", index=False)
 
-    for plot_i, idx in enumerate(subset_idx):
-        r = plot_i // cols
-        c = plot_i % cols
-
-        row = test_df.iloc[idx]
-        filepath = row["filepath"]
-
-        img = load_gray_image(filepath, target_size=image_size)
-
-        true_label = int(y_true[idx])
-        pred_label = int(y_pred[idx])
-
-        axes[r, c].imshow(img[..., 0], cmap="gray")
-        axes[r, c].set_title(
-            f"True: {class_names[true_label]}\nPred: {class_names[pred_label]}",
-            fontsize=10,
-        )
-        axes[r, c].axis("off")
-
-        rows.append(
-            {
-                "filepath": filepath,
-                "true_label": true_label,
-                "pred_label": pred_label,
-                "true_name": class_names[true_label],
-                "pred_name": class_names[pred_label],
-            }
-        )
-
-    total_axes = rows_n * cols
-    for extra_i in range(n, total_axes):
-        r = extra_i // cols
-        c = extra_i % cols
-        axes[r, c].axis("off")
-
-    plt.tight_layout()
-    fig_path = mis_dir / "misclassified_examples.png"
-    plt.savefig(fig_path, dpi=150, bbox_inches="tight")
-    plt.show()
-
-    mis_df = pd.DataFrame(rows)
-    mis_df.to_csv(mis_dir / "misclassified_examples.csv", index=False)
-
-    print(f"[INFO] Saved misclassified figure: {fig_path}")
-    print(f"[INFO] Saved misclassified CSV: {mis_dir / 'misclassified_examples.csv'}")
-
-    return mis_df
-
-
-# =========================================================
-# main
-# =========================================================
-
-def run_evaluation(
-    model_path: str | Path = MODELS_DIR,
-    split_dir: str | Path = SPLITS_DIR,
-    out_dir: str | Path = OUTPUT_DIR / "evaluation",
-    image_size: tuple[int, int] = IMAGE_SIZE,
-    batch_size: int = BATCH_SIZE,
-    seed: int = SEED,
-    max_misclassified_examples: int = 12,
-):
-    model_path = Path(model_path)
-    out_dir = ensure_dir(out_dir)
-    class_names = get_class_names()
-    model_name = infer_model_name(model_path)
-
-    print("=" * 80)
-    print(f"EVALUATION - {model_name}")
-    print("=" * 80)
-    print(f"Model path: {model_path}")
-    print(f"Split dir: {split_dir}")
-    print(f"Output dir: {out_dir}")
-    print("=" * 80)
-
-    # -----------------------------------------------------
-    # load model
-    # -----------------------------------------------------
-    model = tf.keras.models.load_model(model_path, safe_mode=False)
-
-    # -----------------------------------------------------
-    # dataset
-    # -----------------------------------------------------
-    _, _, test_ds, _, _, test_df = build_datasets_from_split_csvs(
-        split_dir=split_dir,
-        image_size=image_size,
-        batch_size=batch_size,
-        seed=seed,
-    )
-
-    # -----------------------------------------------------
-    # keras evaluate
-    # -----------------------------------------------------
-    keras_metrics = model.evaluate(test_ds, verbose=1, return_dict=True)
-
-    loss = float(keras_metrics["loss"])
-    accuracy = float(keras_metrics.get("accuracy", 0.0))
-
-    # -----------------------------------------------------
-    # predictions
-    # -----------------------------------------------------
-    y_true, y_pred, y_prob = collect_predictions(model, test_ds)
-
-    extra_metrics = compute_metrics(
-        y_true,
-        y_pred,
-        loss=loss,
+    plot_confusion_and_roc_row(
+        y_true=y_true,
+        y_pred=y_pred,
         y_prob=y_prob,
-        num_classes=NUM_CLASSES,
+        class_names=class_names,
+        model_name=model_name,
+        save_path=eval_out_dir / "evaluation_row.png",
     )
-    recall = extra_metrics["recall_macro"]
-    f1 = extra_metrics["f1_macro"]
-    roc_auc_macro_ovr = extra_metrics.get("roc_auc_macro_ovr", float("nan"))
 
-    # -----------------------------------------------------
-    # save summary
-    # -----------------------------------------------------
-    results = {
+    summary = {
         "model_name": model_name,
-        "model_path": str(model_path),
-        "loss": loss,
-        "accuracy": accuracy,
-        "recall_macro": recall,
-        "f1_macro": f1,
-        "roc_auc_macro_ovr": roc_auc_macro_ovr,
-        "n_samples": int(len(test_df)),
-        "num_classes": int(NUM_CLASSES),
-        "class_names": class_names,
+        "data_variant": data_variant,
+        "model_path": str(Path(model_path)),
+        "split_dir": str(Path(split_dir)),
+        "data_root": str(data_root),
+        "out_dir": str(eval_out_dir),
+        "metrics": metrics,
     }
+    save_json(summary, eval_out_dir / "metrics.json")
 
-    print("\nResults:")
-    print(json.dumps(results, indent=2, ensure_ascii=False))
+    print("\nMetrics")
+    print("-" * 72)
+    for k, v in metrics.items():
+        print(f"{k:<20}: {v:.6f}" if isinstance(v, float) and not np.isnan(v) else f"{k:<20}: {v}")
+    print("-" * 72)
 
-    save_json(results, out_dir / "evaluation_metrics.json")
-
-    # -----------------------------------------------------
-    # plot metrics row
-    # -----------------------------------------------------
-    plot_metrics_row(
-        loss=loss,
-        accuracy=accuracy,
-        recall=recall,
-        f1=f1,
-        save_path=out_dir / "metrics_row.png",
-    )
-
-    # -----------------------------------------------------
-    # confusion matrix
-    # -----------------------------------------------------
-    cm = confusion_matrix(y_true, y_pred, labels=np.arange(len(class_names)))
-    np.save(out_dir / "confusion_matrix.npy", cm)
-
-    # -----------------------------------------------------
-    # classification report
-    # -----------------------------------------------------
-    report_dict, report_text, report_df = save_classification_report_files(
-        y_true=y_true,
-        y_pred=y_pred,
-        class_names=class_names,
-        out_dir=out_dir,
-    )
-
-    print("\nClassification report:")
-    print(report_text)
-
-    # -----------------------------------------------------
-    # ROC AUC
-    # -----------------------------------------------------
-    if np.isnan(roc_auc_macro_ovr):
-        print("[WARN] ROC AUC számítás nem sikerült.")
-    else:
-        save_json(
-            {"roc_auc_macro_ovr": float(roc_auc_macro_ovr)},
-            out_dir / "roc_auc.json",
-        )
-        print(f"[INFO] ROC AUC macro OVR: {roc_auc_macro_ovr:.4f}")
-
-    # -----------------------------------------------------
-    # combined evaluation row
-    # -----------------------------------------------------
-    plot_evaluation_row(
-        cm=cm,
-        y_true=y_true,
-        y_prob=y_prob,
-        class_names=class_names,
-        save_path=out_dir / "evaluation_row.png",
-    )
-
-    # -----------------------------------------------------
-    # Misclassified examples
-    # -----------------------------------------------------
-    mis_df = save_misclassified_examples(
-        test_df=test_df,
-        y_true=y_true,
-        y_pred=y_pred,
-        class_names=class_names,
-        out_dir=out_dir,
-        max_examples=max_misclassified_examples,
-        image_size=image_size,
-    )
-
-    return {
-        "results": results,
-        "report_df": report_df,
-        "misclassified_df": mis_df,
-        "out_dir": out_dir,
-        "metrics_json": out_dir / "evaluation_metrics.json",
-        "metrics_row_png": out_dir / "metrics_row.png",
-        "evaluation_row_png": out_dir / "evaluation_row.png",
-        "classification_report_csv": out_dir / "classification_report.csv",
-        "misclassified_csv": out_dir / "misclassified" / "misclassified_examples.csv",
-    }
-
-
-# =========================================================
-# main
-# =========================================================
-
-if __name__ == "__main__":
-    run_evaluation(
-        model_path=MODELS_DIR / "resnet50" / "best_model.keras",
-        split_dir=SPLITS_DIR,
-        out_dir=OUTPUT_DIR / "evaluation" / "resnet50",
-    )
+    return summary
