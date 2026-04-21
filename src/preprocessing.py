@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 import matplotlib.pyplot as plt
-import numpy as np
 import tensorflow as tf
 
 from src.config import CLASS_INFOS, ClassInfo, IMAGE_SIZE, RAW_DIR, SEED, ensure_dir
@@ -63,7 +62,7 @@ def minmax_normalize(image: tf.Tensor, eps: float = 1e-6) -> tf.Tensor:
 
 
 # =========================================================
-# Percentilis
+# Opcionális, lassabb preprocess elemek
 # =========================================================
 
 def tf_percentile(x: tf.Tensor, q: float) -> tf.Tensor:
@@ -73,14 +72,10 @@ def tf_percentile(x: tf.Tensor, q: float) -> tf.Tensor:
 
     idx = tf.cast(
         tf.round((q / 100.0) * tf.cast(n - 1, tf.float32)),
-        tf.int32
+        tf.int32,
     )
     return x[idx]
 
-
-# =========================================================
-# Border crop
-# =========================================================
 
 def smart_border_crop(
     image: tf.Tensor,
@@ -121,11 +116,10 @@ def smart_border_crop(
     return tf.cond(tf.shape(coords)[0] > 0, _do_crop, _no_crop)
 
 
-# =========================================================
-# Kontraszt normalizálás
-# =========================================================
-
-def contrast_normalize(image: tf.Tensor, clip_limit: float = 0.01) -> tf.Tensor:
+def contrast_normalize_percentile(
+    image: tf.Tensor,
+    clip_limit: float = 0.01,
+) -> tf.Tensor:
     image = _ensure_3d_gray(image)
     image = minmax_normalize(image)
 
@@ -138,6 +132,17 @@ def contrast_normalize(image: tf.Tensor, clip_limit: float = 0.01) -> tf.Tensor:
     return image
 
 
+def contrast_normalize_fast(
+    image: tf.Tensor,
+    contrast_factor: float = 1.15,
+) -> tf.Tensor:
+    image = _ensure_3d_gray(image)
+    image = minmax_normalize(image)
+    image = tf.image.adjust_contrast(image, contrast_factor=contrast_factor)
+    image = tf.clip_by_value(image, 0.0, 1.0)
+    return image
+
+
 # =========================================================
 # Preprocess layer
 # =========================================================
@@ -146,14 +151,16 @@ class XrayPreprocessLayer(tf.keras.layers.Layer):
     def __init__(
         self,
         image_size: tuple[int, int] = IMAGE_SIZE,
-        apply_crop: bool = True,
-        apply_contrast_norm: bool = True,
+        apply_crop: bool = False,
+        apply_contrast_norm: bool = False,
+        use_fast_contrast: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.image_size = image_size
         self.apply_crop = apply_crop
         self.apply_contrast_norm = apply_contrast_norm
+        self.use_fast_contrast = use_fast_contrast
 
     def call(self, image: tf.Tensor) -> tf.Tensor:
         image = _ensure_3d_gray(image)
@@ -170,9 +177,24 @@ class XrayPreprocessLayer(tf.keras.layers.Layer):
         )
 
         if self.apply_contrast_norm:
-            image = contrast_normalize(image)
+            if self.use_fast_contrast:
+                image = contrast_normalize_fast(image)
+            else:
+                image = contrast_normalize_percentile(image)
 
         return tf.clip_by_value(image, 0.0, 1.0)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "image_size": self.image_size,
+                "apply_crop": self.apply_crop,
+                "apply_contrast_norm": self.apply_contrast_norm,
+                "use_fast_contrast": self.use_fast_contrast,
+            }
+        )
+        return config
 
 
 # =========================================================
@@ -195,7 +217,8 @@ class RandomXrayAugment(tf.keras.layers.Layer):
         self.rotation = tf.keras.layers.RandomRotation(rotation_factor)
         self.zoom = tf.keras.layers.RandomZoom((-zoom_factor, zoom_factor))
         self.translate = tf.keras.layers.RandomTranslation(
-            translate_ratio, translate_ratio
+            translate_ratio,
+            translate_ratio,
         )
         self.contrast = tf.keras.layers.RandomContrast(contrast_factor)
 
@@ -209,18 +232,28 @@ class RandomXrayAugment(tf.keras.layers.Layer):
         if not training:
             return images
 
-        x = self.rotation(images)
-        x = self.zoom(x)
-        x = self.translate(x)
-        x = self.contrast(x)
+        x = self.rotation(images, training=training)
+        x = self.zoom(x, training=training)
+        x = self.translate(x, training=training)
+        x = self.contrast(x, training=training)
 
         if self.enable_flip:
-            x = self.flip(x)
+            x = self.flip(x, training=training)
 
         delta = tf.random.uniform([], -self.brightness_delta, self.brightness_delta)
         x = tf.clip_by_value(x + delta, 0.0, 1.0)
 
         return x
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "enable_flip": self.enable_flip,
+                "brightness_delta": self.brightness_delta,
+            }
+        )
+        return config
 
 
 # =========================================================
@@ -228,9 +261,24 @@ class RandomXrayAugment(tf.keras.layers.Layer):
 # =========================================================
 
 def decode_xray_image(path: tf.Tensor) -> tf.Tensor:
-    img = tf.io.read_file(path)
-    img = tf.io.decode_image(img, channels=1, expand_animations=False)
-    return tf.image.convert_image_dtype(img, tf.float32)
+    path = tf.convert_to_tensor(path)
+    img_bytes = tf.io.read_file(path)
+    lower = tf.strings.lower(path)
+
+    def _decode_png():
+        return tf.io.decode_png(img_bytes, channels=1)
+
+    def _decode_jpeg():
+        return tf.io.decode_jpeg(img_bytes, channels=1)
+
+    img = tf.cond(
+        tf.strings.regex_full_match(lower, r".*\.png"),
+        _decode_png,
+        _decode_jpeg,
+    )
+
+    img = tf.image.convert_image_dtype(img, tf.float32)
+    return img
 
 
 # =========================================================
@@ -245,26 +293,49 @@ def build_classification_dataset(
     training: bool = False,
     shuffle: bool = True,
     seed: int = SEED,
+    apply_crop: bool = False,
+    apply_contrast_norm: bool = False,
+    use_fast_contrast: bool = True,
+    cache: bool = True,
 ):
-    preprocess = XrayPreprocessLayer(image_size=image_size)
+    preprocess = XrayPreprocessLayer(
+        image_size=image_size,
+        apply_crop=apply_crop,
+        apply_contrast_norm=apply_contrast_norm,
+        use_fast_contrast=use_fast_contrast,
+    )
     augment = RandomXrayAugment()
 
     ds = tf.data.Dataset.from_tensor_slices((list(filepaths), list(labels)))
 
     if training and shuffle:
-        ds = ds.shuffle(len(filepaths), seed=seed)
+        ds = ds.shuffle(
+            buffer_size=min(len(filepaths), 1000),
+            seed=seed,
+            reshuffle_each_iteration=True,
+        )
 
     def _map(path, label):
         img = decode_xray_image(path)
         img = preprocess(img)
-
-        if training:
-            img = augment(tf.expand_dims(img, 0), training=True)[0]
-
+        label = tf.cast(label, tf.int32)
         return img, label
 
     ds = ds.map(_map, num_parallel_calls=AUTOTUNE)
-    return ds.batch(batch_size).prefetch(AUTOTUNE)
+
+    if cache:
+        ds = ds.cache()
+
+    ds = ds.batch(batch_size)
+
+    if training:
+        ds = ds.map(
+            lambda x, y: (augment(x, training=True), y),
+            num_parallel_calls=AUTOTUNE,
+        )
+
+    ds = ds.prefetch(AUTOTUNE)
+    return ds
 
 
 # =========================================================
@@ -277,14 +348,28 @@ def plot_random_pre_post_samples_per_class(
     n_per_class: int = 3,
     seed: int = SEED,
     augment_preview: bool = False,
+    apply_crop: bool = False,
+    apply_contrast_norm: bool = False,
+    use_fast_contrast: bool = True,
     save_path: str | Path | None = None,
 ):
     rng = random.Random(seed)
 
     rows = len(CLASS_INFOS)
-    cols = n_per_class * 2
+    cols = n_per_class * (3 if augment_preview else 2)
 
     fig, axes = plt.subplots(rows, cols, figsize=(cols * 3, rows * 3))
+
+    if rows == 1:
+        axes = [axes]
+
+    preprocess = XrayPreprocessLayer(
+        image_size=image_size,
+        apply_crop=apply_crop,
+        apply_contrast_norm=apply_contrast_norm,
+        use_fast_contrast=use_fast_contrast,
+    )
+    augment = RandomXrayAugment()
 
     for row, c in enumerate(CLASS_INFOS):
         files = get_all_image_files(get_class_dir(root_dir, c))
@@ -296,15 +381,23 @@ def plot_random_pre_post_samples_per_class(
 
         for i, f in enumerate(chosen):
             raw = decode_xray_image(str(f)).numpy()
-            proc = XrayPreprocessLayer(image_size)(raw).numpy()
+            proc = preprocess(raw).numpy()
 
-            axes[row, 2 * i].imshow(raw[..., 0], cmap="gray")
-            axes[row, 2 * i].set_title(f"{c.display_name}\nRAW")
-            axes[row, 2 * i].axis("off")
+            col_base = i * (3 if augment_preview else 2)
 
-            axes[row, 2 * i + 1].imshow(proc[..., 0], cmap="gray")
-            axes[row, 2 * i + 1].set_title(f"{c.display_name}\nPROC")
-            axes[row, 2 * i + 1].axis("off")
+            axes[row][col_base].imshow(raw[..., 0], cmap="gray")
+            axes[row][col_base].set_title(f"{c.display_name}\nRAW")
+            axes[row][col_base].axis("off")
+
+            axes[row][col_base + 1].imshow(proc[..., 0], cmap="gray")
+            axes[row][col_base + 1].set_title(f"{c.display_name}\nPROC")
+            axes[row][col_base + 1].axis("off")
+
+            if augment_preview:
+                aug = augment(tf.expand_dims(proc, 0), training=True)[0].numpy()
+                axes[row][col_base + 2].imshow(aug[..., 0], cmap="gray")
+                axes[row][col_base + 2].set_title(f"{c.display_name}\nAUG")
+                axes[row][col_base + 2].axis("off")
 
     plt.tight_layout()
 
