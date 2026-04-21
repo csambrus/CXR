@@ -445,9 +445,11 @@ def build_datasets_from_split_csvs(
 
 def inspect_batch(ds, n_classes: int | None = None, sample_size: int = 16) -> None:
     """
-    Kiír egy batch shape-et, majd random label mintát a batch-ből
-    (nem az első elemeket).
+    Egy véletlenszerű batch-et vizsgál meg, és abból random label mintát ír ki.
     """
+    shuffle_buffer = 5000
+    ds = ds.shuffle(shuffle_buffer, reshuffle_each_iteration=True)
+    
     for images, labels in ds.take(1):
         batch_size = images.shape[0]
 
