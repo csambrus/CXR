@@ -1,314 +1,371 @@
-# compare_models.py
-
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
-import tensorflow as tf
-from sklearn.metrics import (
-    accuracy_score,
-    f1_score,
-    recall_score,
-    roc_auc_score,
-    roc_curve,
-)
-from sklearn.preprocessing import label_binarize
 
-from src.config import BATCH_SIZE, CLASS_INFOS, IMAGE_SIZE, NUM_CLASSES, SEED, MODELS_DIR, SPLITS_DIR, ensure_dir, get_class_names, save_json
-from src.evaluate import collect_predictions, compute_metrics
-from src.dataloader import build_datasets_from_split_csvs
+from src.config import (
+    MODELS_DIR,
+    PLOT_DPI,
+    ensure_dir,
+    save_json,
+)
+from src.evaluate import run_evaluation
+from src.train import run_training
+
 
 # =========================================================
-# plot helpers
+# Helpers
+# =========================================================
+
+def _normalize_model_names(model_names: str | Iterable[str]) -> list[str]:
+    if isinstance(model_names, str):
+        return [model_names]
+    return list(model_names)
+
+
+def _normalize_variants(data_variants: str | Iterable[str]) -> list[str]:
+    if isinstance(data_variants, str):
+        return [data_variants]
+    return list(data_variants)
+
+
+def _safe_metric(metrics: dict[str, Any], key: str, default: float | None = None):
+    value = metrics.get(key, default)
+    return value
+
+
+# =========================================================
+# Plot helpers
 # =========================================================
 
 def plot_metric_bars(
     comparison_df: pd.DataFrame,
     metric: str,
     save_path: str | Path | None = None,
+    title: str | None = None,
 ):
-    fig, ax = plt.subplots(figsize=(8, 5))
+    if metric not in comparison_df.columns:
+        raise ValueError(f"Metric '{metric}' not found in comparison dataframe.")
 
-    ax.bar(comparison_df["model_name"], comparison_df[metric])
-    ax.set_title(metric.replace("_", " ").title())
+    df = comparison_df.copy()
+    df["label"] = df["model"] + "\n(" + df["data_variant"] + ")"
+    df = df.sort_values(metric, ascending=False).reset_index(drop=True)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.bar(df["label"], df[metric])
+
+    ax.set_title(title or f"Model comparison - {metric}")
     ax.set_ylabel(metric)
+    ax.set_xlabel("Model / Variant")
+    ax.grid(True, axis="y", alpha=0.3)
+    plt.xticks(rotation=45, ha="right")
 
-    if metric == "loss":
-        upper = max(1.0, float(comparison_df[metric].max()) * 1.15)
-        ax.set_ylim(0, upper)
-    else:
-        ax.set_ylim(0, 1.0)
-
-    for i, val in enumerate(comparison_df[metric]):
-        ax.text(i, float(val), f"{float(val):.4f}", ha="center", va="bottom", fontsize=10)
-
-    plt.xticks(rotation=20, ha="right")
-    plt.tight_layout()
+    fig.tight_layout()
 
     if save_path is not None:
-        save_path = Path(save_path)
-        ensure_dir(save_path.parent)
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
 
-    plt.show()
+    plt.close(fig)
 
 
-def plot_metrics_row_comparison(
+def plot_metric_by_variant(
     comparison_df: pd.DataFrame,
+    metric: str,
     save_path: str | Path | None = None,
+    title: str | None = None,
 ):
-    metrics = ["loss", "accuracy", "recall_macro", "f1_macro"]
+    if metric not in comparison_df.columns:
+        raise ValueError(f"Metric '{metric}' not found in comparison dataframe.")
 
-    fig, axes = plt.subplots(1, 4, figsize=(20, 4))
-
-    for ax, metric in zip(axes, metrics):
-        ax.bar(comparison_df["model_name"], comparison_df[metric])
-        ax.set_title(metric.replace("_", " ").title())
-        ax.tick_params(axis="x", rotation=20)
-
-        if metric == "loss":
-            upper = max(1.0, float(comparison_df[metric].max()) * 1.15)
-            ax.set_ylim(0, upper)
-        else:
-            ax.set_ylim(0, 1.0)
-
-        for i, val in enumerate(comparison_df[metric]):
-            ax.text(i, float(val), f"{float(val):.4f}", ha="center", va="bottom", fontsize=9)
-
-    plt.tight_layout()
-
-    if save_path is not None:
-        save_path = Path(save_path)
-        ensure_dir(save_path.parent)
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
-
-    plt.show()
-
-
-def plot_model_roc_comparison(
-    roc_payloads: list[dict[str, Any]],
-    class_names: list[str],
-    save_path: str | Path | None = None,
-):
-    fig, ax = plt.subplots(figsize=(8, 6))
-
-    for payload in roc_payloads:
-        model_name = payload["model_name"]
-        y_true = payload["y_true"]
-        y_prob = payload["y_prob"]
-
-        y_true_bin = label_binarize(y_true, classes=np.arange(len(class_names)))
-
-        fpr_micro, tpr_micro, _ = roc_curve(y_true_bin.ravel(), y_prob.ravel())
-
-        auc_micro = np.nan
-        try:
-            auc_micro = roc_auc_score(
-                y_true_bin,
-                y_prob,
-                multi_class="ovr",
-                average="micro",
-            )
-        except Exception:
-            try:
-                auc_micro = roc_auc_score(y_true_bin.ravel(), y_prob.ravel())
-            except Exception:
-                auc_micro = np.nan
-
-        label = f"{model_name} (AUC={auc_micro:.3f})" if not np.isnan(auc_micro) else model_name
-        ax.plot(fpr_micro, tpr_micro, label=label)
-
-    ax.plot([0, 1], [0, 1], linestyle="--")
-    ax.set_title("Model ROC Comparison (micro-average)")
-    ax.set_xlabel("False Positive Rate")
-    ax.set_ylabel("True Positive Rate")
-    ax.legend(loc="lower right")
-    plt.tight_layout()
-
-    if save_path is not None:
-        save_path = Path(save_path)
-        ensure_dir(save_path.parent)
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
-
-    plt.show()
-
-
-# =========================================================
-# model evaluation
-# =========================================================
-
-def evaluate_saved_model(
-    model_name: str,
-    model_path: str | Path,
-    test_ds,
-    num_classes: int,
-):
-    model = tf.keras.models.load_model(model_path, safe_mode = False)
-
-    keras_metrics = model.evaluate(test_ds, verbose=0, return_dict=True)
-    loss = float(keras_metrics["loss"])
-
-    y_true, y_pred, y_prob = collect_predictions(model, test_ds)
-    metrics = compute_metrics(
-        loss=loss,
-        y_true=y_true,
-        y_pred=y_pred,
-        y_prob=y_prob,
-        num_classes=num_classes,
+    pivot_df = comparison_df.pivot(
+        index="model",
+        columns="data_variant",
+        values=metric,
     )
 
-    result = {
-        "model_name": model_name,
-        **metrics,
-    }
+    fig, ax = plt.subplots(figsize=(10, 5))
+    pivot_df.plot(kind="bar", ax=ax)
 
-    roc_payload = {
-        "model_name": model_name,
-        "y_true": y_true,
-        "y_prob": y_prob,
-    }
+    ax.set_title(title or f"{metric} by model and data variant")
+    ax.set_ylabel(metric)
+    ax.set_xlabel("Model")
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(title="data_variant")
 
-    return result, roc_payload
+    fig.tight_layout()
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
+
+    plt.close(fig)
 
 
-# =========================================================
-# main compare
-# =========================================================
-
-def run_model_comparison(
-    model_names: list[str] | tuple[str, ...],
-    models_dir: str | Path,
-    split_dir: str | Path,
-    out_dir: str | Path = "outputs/model_comparison",
-    image_size: tuple[int, int] = IMAGE_SIZE,
-    batch_size: int = BATCH_SIZE,
-    seed: int = SEED,
-    model_filename: str = "best_model.keras",
+def plot_all_main_metrics(
+    comparison_df: pd.DataFrame,
+    out_dir: str | Path,
 ):
-    models_dir = Path(models_dir)
-    out_dir = ensure_dir(out_dir)
-    class_names = get_class_names()
+    out_dir = Path(out_dir)
+    ensure_dir(out_dir)
 
-    print("=" * 80)
-    print("MODEL COMPARISON")
-    print("=" * 80)
-    print(f"Models dir: {models_dir}")
-    print(f"Split dir:  {split_dir}")
-    print(f"Output dir: {out_dir}")
-    print(f"Models:     {list(model_names)}")
-    print("=" * 80)
+    metrics_to_plot = [
+        "accuracy",
+        "recall_macro",
+        "f1_macro",
+        "roc_auc_macro_ovr",
+        "loss",
+    ]
 
-    # közös test dataset
-    _, _, test_ds, _, _, test_df = build_datasets_from_split_csvs(
-        split_dir=split_dir,
-        image_size=image_size,
-        batch_size=batch_size,
-        seed=seed,
-    )
-
-    rows: list[dict[str, Any]] = []
-    roc_payloads: list[dict[str, Any]] = []
-
-    for model_name in model_names:
-        model_path = models_dir / model_name / model_filename
-
-        if not model_path.exists():
-            print(f"[WARN] Missing model file, skipped: {model_path}")
+    for metric in metrics_to_plot:
+        if metric not in comparison_df.columns:
             continue
 
-        print(f"[INFO] Evaluating: {model_name}")
-        result, roc_payload = evaluate_saved_model(
-            model_name=model_name,
-            model_path=model_path,
-            test_ds=test_ds,
-            num_classes=NUM_CLASSES,
-        )
-
-        rows.append(result)
-        roc_payloads.append(roc_payload)
-
-    if not rows:
-        raise ValueError("Nem találtam egyetlen kiértékelhető modellt sem.")
-
-    comparison_df = pd.DataFrame(rows)
-    comparison_df = comparison_df.sort_values("f1_macro", ascending=False).reset_index(drop=True)
-
-    comparison_csv = out_dir / "model_comparison.csv"
-    comparison_df.to_csv(comparison_csv, index=False)
-    print(f"[INFO] Saved: {comparison_csv}")
-
-    summary = {
-        "n_models": int(len(comparison_df)),
-        "n_test_samples": int(len(test_df)),
-        "class_names": class_names,
-        "models": comparison_df.to_dict(orient="records"),
-    }
-    save_json(summary, out_dir / "model_comparison.json")
-
-    # fő összehasonlító ábrák
-    plot_metrics_row_comparison(
-        comparison_df=comparison_df,
-        save_path=out_dir / "metrics_row_comparison.png",
-    )
-
-    plot_model_roc_comparison(
-        roc_payloads=roc_payloads,
-        class_names=class_names,
-        save_path=out_dir / "roc_model_comparison.png",
-    )
-
-    # külön bar chartok
-    for metric in ["loss", "accuracy", "recall_macro", "f1_macro", "roc_auc_macro_ovr"]:
         plot_metric_bars(
             comparison_df=comparison_df,
             metric=metric,
-            save_path=out_dir / f"{metric}_comparison.png",
+            save_path=out_dir / f"bar_{metric}.png",
+            title=f"Comparison - {metric}",
         )
 
-    print("\nComparison results:")
-    print(comparison_df)
-
-    return {
-        "comparison_df": comparison_df,
-        "out_dir": out_dir,
-        "comparison_csv": comparison_csv,
-        "metrics_row_png": out_dir / "metrics_row_comparison.png",
-        "roc_comparison_png": out_dir / "roc_model_comparison.png",
-    }
+        plot_metric_by_variant(
+            comparison_df=comparison_df,
+            metric=metric,
+            save_path=out_dir / f"grouped_{metric}.png",
+            title=f"{metric} by model / variant",
+        )
 
 
 # =========================================================
-# optional helper after training
+# Core comparison logic
 # =========================================================
 
-def compare_after_training(
+def compare_existing_results(
+    result_summaries: list[dict[str, Any]],
+    out_dir: str | Path = MODELS_DIR,
+    comparison_name: str = "comparison",
+) -> pd.DataFrame:
+    out_dir = ensure_dir(Path(out_dir) / comparison_name)
+
+    rows: list[dict[str, Any]] = []
+
+    for item in result_summaries:
+        train_summary = item.get("train_summary", {})
+        eval_summary = item.get("eval_summary", {})
+        metrics = eval_summary.get("metrics", {})
+
+        row = {
+            "model": eval_summary.get("model_name", train_summary.get("model_name")),
+            "data_variant": eval_summary.get("data_variant", train_summary.get("data_variant")),
+            "model_path": eval_summary.get("model_path", train_summary.get("best_model_path")),
+            "data_root": eval_summary.get("data_root", train_summary.get("data_root")),
+            "out_dir": eval_summary.get("out_dir", train_summary.get("out_dir")),
+            "loss": _safe_metric(metrics, "loss"),
+            "accuracy": _safe_metric(metrics, "accuracy"),
+            "recall_macro": _safe_metric(metrics, "recall_macro"),
+            "f1_macro": _safe_metric(metrics, "f1_macro"),
+            "roc_auc_macro_ovr": _safe_metric(metrics, "roc_auc_macro_ovr"),
+        }
+        row["model_variant"] = f"{row['model']}_{row['data_variant']}"
+        rows.append(row)
+
+    comparison_df = pd.DataFrame(rows)
+
+    if len(comparison_df) == 0:
+        raise ValueError("No results found to compare.")
+
+    comparison_df = comparison_df.sort_values(
+        by=["accuracy", "f1_macro", "recall_macro"],
+        ascending=False,
+    ).reset_index(drop=True)
+
+    comparison_df.to_csv(out_dir / "comparison.csv", index=False)
+    save_json(
+        {"rows": comparison_df.to_dict(orient="records")},
+        out_dir / "comparison.json",
+    )
+
+    plot_all_main_metrics(comparison_df, out_dir)
+
+    leaderboard_cols = [
+        "model_variant",
+        "model",
+        "data_variant",
+        "accuracy",
+        "f1_macro",
+        "recall_macro",
+        "roc_auc_macro_ovr",
+        "loss",
+    ]
+    leaderboard_df = comparison_df[leaderboard_cols].copy()
+    leaderboard_df.to_csv(out_dir / "leaderboard.csv", index=False)
+
+    return comparison_df
+
+
+def run_multiple_models(
     split_dir: str | Path,
-    models_dir: str | Path,
-    out_dir: str | Path,
-    model_names: list[str] | tuple[str, ...] = ("resnet50", "vgg16", "efficientnetb0", "baseline_cnn"),
-):
-    return run_model_comparison(
-        model_names=model_names,
-        models_dir=models_dir,
-        split_dir=split_dir,
+    out_dir: str | Path = MODELS_DIR,
+    model_names: str | Iterable[str] = ("baseline_cnn", "resnet50", "vgg16", "efficientnetb0"),
+    data_variants: str | Iterable[str] = ("raw",),
+    pretrained: bool = True,
+    do_fine_tuning: bool = False,
+    epochs_head: int = 8,
+    epochs_finetune: int = 5,
+    learning_rate_head: float = 1e-3,
+    learning_rate_finetune: float = 1e-5,
+    comparison_name: str = "comparison",
+) -> pd.DataFrame:
+    model_names = _normalize_model_names(model_names)
+    data_variants = _normalize_variants(data_variants)
+
+    all_results: list[dict[str, Any]] = []
+
+    print("=" * 72)
+    print("RUN MULTIPLE MODELS")
+    print("=" * 72)
+    print("model_names   :", model_names)
+    print("data_variants :", data_variants)
+    print("comparison    :", comparison_name)
+    print("=" * 72)
+
+    for model_name in model_names:
+        for data_variant in data_variants:
+            print("\n" + "-" * 72)
+            print(f"Running model={model_name} | data_variant={data_variant}")
+            print("-" * 72)
+
+            train_summary = run_training(
+                split_dir=split_dir,
+                out_dir=out_dir,
+                model_name=model_name,
+                pretrained=pretrained,
+                do_fine_tuning=do_fine_tuning,
+                epochs_head=epochs_head,
+                epochs_finetune=epochs_finetune,
+                learning_rate_head=learning_rate_head,
+                learning_rate_finetune=learning_rate_finetune,
+                data_variant=data_variant,
+            )
+
+            eval_summary = run_evaluation(
+                model_path=train_summary["best_model_path"],
+                split_dir=split_dir,
+                out_dir=out_dir,
+                model_name=model_name,
+                data_variant=data_variant,
+            )
+
+            all_results.append(
+                {
+                    "train_summary": train_summary,
+                    "eval_summary": eval_summary,
+                }
+            )
+
+    comparison_df = compare_existing_results(
+        result_summaries=all_results,
         out_dir=out_dir,
+        comparison_name=comparison_name,
     )
+
+    return comparison_df
 
 
 # =========================================================
-# main
+# Loading already finished experiments
 # =========================================================
 
-if __name__ == "__main__":
-    run_model_comparison(
-        model_names=["resnet50", "vgg16", "efficientnetb0", "baseline_cnn"],
-        models_dir=MODELS_DIR,
-        split_dir=SPLITS_DIR,
-        out_dir="outputs/model_comparison",
+def load_metrics_from_model_dirs(
+    model_dirs: Iterable[str | Path],
+    out_dir: str | Path = MODELS_DIR,
+    comparison_name: str = "comparison_loaded",
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+
+    for model_dir in model_dirs:
+        model_dir = Path(model_dir)
+        metrics_path = model_dir / "metrics.json"
+
+        if not metrics_path.exists():
+            print(f"[WARN] Missing metrics.json: {metrics_path}")
+            continue
+
+        import json
+        with open(metrics_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        metrics = data.get("metrics", {})
+        row = {
+            "model": data.get("model_name"),
+            "data_variant": data.get("data_variant"),
+            "model_path": data.get("model_path"),
+            "data_root": data.get("data_root"),
+            "out_dir": data.get("out_dir"),
+            "loss": _safe_metric(metrics, "loss"),
+            "accuracy": _safe_metric(metrics, "accuracy"),
+            "recall_macro": _safe_metric(metrics, "recall_macro"),
+            "f1_macro": _safe_metric(metrics, "f1_macro"),
+            "roc_auc_macro_ovr": _safe_metric(metrics, "roc_auc_macro_ovr"),
+        }
+        row["model_variant"] = f"{row['model']}_{row['data_variant']}"
+        rows.append(row)
+
+    comparison_df = pd.DataFrame(rows)
+    if len(comparison_df) == 0:
+        raise ValueError("No valid metrics.json files found.")
+
+    comparison_df = comparison_df.sort_values(
+        by=["accuracy", "f1_macro", "recall_macro"],
+        ascending=False,
+    ).reset_index(drop=True)
+
+    out_dir = ensure_dir(Path(out_dir) / comparison_name)
+    comparison_df.to_csv(out_dir / "comparison.csv", index=False)
+    save_json(
+        {"rows": comparison_df.to_dict(orient="records")},
+        out_dir / "comparison.json",
     )
-    
+
+    plot_all_main_metrics(comparison_df, out_dir)
+
+    leaderboard_cols = [
+        "model_variant",
+        "model",
+        "data_variant",
+        "accuracy",
+        "f1_macro",
+        "recall_macro",
+        "roc_auc_macro_ovr",
+        "loss",
+    ]
+    comparison_df[leaderboard_cols].to_csv(out_dir / "leaderboard.csv", index=False)
+
+    return comparison_df
+
+
+# =========================================================
+# Convenience report
+# =========================================================
+
+def print_leaderboard(comparison_df: pd.DataFrame, top_k: int | None = None) -> None:
+    df = comparison_df.copy()
+
+    if top_k is not None:
+        df = df.head(top_k)
+
+    cols = [
+        "model_variant",
+        "accuracy",
+        "f1_macro",
+        "recall_macro",
+        "roc_auc_macro_ovr",
+        "loss",
+    ]
+    cols = [c for c in cols if c in df.columns]
+
+    print("\nLeaderboard")
+    print("-" * 100)
+    print(df[cols].to_string(index=False))
+    print("-" * 100)
