@@ -288,7 +288,6 @@ def build_classification_dataset(
     filepaths: Sequence[str] | Sequence[Path],
     labels: Sequence[int],
     image_size: tuple[int, int] = IMAGE_SIZE,
-    batch_size: int = BATCH_SIZE,
     training: bool = False,
     shuffle: bool = True,
     seed: int = SEED,
@@ -303,7 +302,6 @@ def build_classification_dataset(
         apply_contrast_norm=apply_contrast_norm,
         use_fast_contrast=use_fast_contrast,
     )
-    augment = RandomXrayAugment()
 
     ds = tf.data.Dataset.from_tensor_slices((list(filepaths), list(labels)))
 
@@ -322,19 +320,15 @@ def build_classification_dataset(
 
     ds = ds.map(_map, num_parallel_calls=AUTOTUNE)
 
-    if cache:
-        ds = ds.cache()
-
-    ds = ds.batch(batch_size)
-
-    if training:
-        ds = ds.map(
-            lambda x, y: (augment(x, training=True), y),
-            num_parallel_calls=AUTOTUNE,
-        )
-
-    ds = ds.prefetch(AUTOTUNE)
     return ds
+
+
+def apply_batch_augmentation(ds):
+    augment = RandomXrayAugment()
+    return ds.map(
+        lambda x, y: (augment(x, training=True), y),
+        num_parallel_calls=AUTOTUNE,
+    )
 
 
 # =========================================================
