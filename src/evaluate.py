@@ -1,10 +1,7 @@
-# evaluate.py
-
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,7 +18,18 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import label_binarize
 
-from src.config import BATCH_SIZE, CLASS_INFOS, IMAGE_SIZE, NUM_CLASSES, SEED, SPLITS_DIR, MODELS_DIR, OUTPUT_DIR, ensure_dir, get_class_names, save_json
+from src.config import (
+    BATCH_SIZE,
+    IMAGE_SIZE,
+    NUM_CLASSES,
+    SEED,
+    SPLITS_DIR,
+    MODELS_DIR,
+    OUTPUT_DIR,
+    ensure_dir,
+    get_class_names,
+    save_json,
+)
 from src.dataloader import build_datasets_from_split_csvs
 
 
@@ -29,7 +37,10 @@ from src.dataloader import build_datasets_from_split_csvs
 # util
 # =========================================================
 
-def load_gray_image(path: str | Path, target_size: tuple[int, int] | None = None) -> np.ndarray:
+def load_gray_image(
+    path: str | Path,
+    target_size: tuple[int, int] | None = None,
+) -> np.ndarray:
     img = tf.io.read_file(str(path))
     img = tf.io.decode_image(img, channels=1, expand_animations=False)
     img = tf.image.convert_image_dtype(img, tf.float32)
@@ -38,6 +49,15 @@ def load_gray_image(path: str | Path, target_size: tuple[int, int] | None = None
         img = tf.image.resize(img, target_size, method="bilinear", antialias=True)
 
     return img.numpy()
+
+
+def infer_model_name(model_path: str | Path) -> str:
+    model_path = Path(model_path)
+
+    if model_path.name == "best_model.keras":
+        return model_path.parent.name
+
+    return model_path.stem
 
 
 # =========================================================
@@ -72,9 +92,8 @@ def compute_metrics(
     y_prob: np.ndarray | None = None,
     num_classes: int | None = None,
 ) -> dict[str, float]:
-    metrics = {}
+    metrics: dict[str, float] = {}
 
-    # --- alap metrikák ---
     metrics["accuracy"] = float(accuracy_score(y_true, y_pred))
     metrics["recall_macro"] = float(
         recall_score(y_true, y_pred, average="macro", zero_division=0)
@@ -83,11 +102,9 @@ def compute_metrics(
         f1_score(y_true, y_pred, average="macro", zero_division=0)
     )
 
-    # --- opcionális loss ---
     if loss is not None:
         metrics["loss"] = float(loss)
 
-    # --- opcionális ROC AUC ---
     if y_prob is not None and num_classes is not None:
         try:
             y_true_bin = label_binarize(y_true, classes=np.arange(num_classes))
@@ -99,9 +116,10 @@ def compute_metrics(
             )
             metrics["roc_auc_macro_ovr"] = float(auc)
         except Exception:
-            metrics["roc_auc_macro_ovr"] = np.nan
+            metrics["roc_auc_macro_ovr"] = float("nan")
 
     return metrics
+
 
 # =========================================================
 # plots
@@ -149,22 +167,33 @@ def plot_metrics_row(
     plt.show()
 
 
-def plot_confusion_matrix_heatmap(
+def plot_evaluation_row(
     cm: np.ndarray,
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
     class_names: list[str],
-    normalize: bool = False,
     save_path: str | Path | None = None,
 ):
-    cm_plot = cm.astype(np.float64)
+    cm_raw = cm.astype(np.float64)
 
-    if normalize:
-        row_sums = cm_plot.sum(axis=1, keepdims=True)
-        cm_plot = np.divide(cm_plot, row_sums, out=np.zeros_like(cm_plot), where=row_sums != 0)
+    row_sums = cm_raw.sum(axis=1, keepdims=True)
+    cm_norm = np.divide(
+        cm_raw,
+        row_sums,
+        out=np.zeros_like(cm_raw),
+        where=row_sums != 0,
+    )
 
-    fig, ax = plt.subplots(figsize=(7, 6))
-    im = ax.imshow(cm_plot)
+    y_true_bin = label_binarize(y_true, classes=np.arange(len(class_names)))
 
-    ax.set_title("Confusion Matrix" + (" (Normalized)" if normalize else ""))
+    fig, axes = plt.subplots(1, 3, figsize=(21, 6))
+
+    # -------------------------------------------------
+    # 1) Confusion matrix
+    # -------------------------------------------------
+    ax = axes[0]
+    im0 = ax.imshow(cm_raw)
+    ax.set_title("Confusion Matrix")
     ax.set_xlabel("Predicted label")
     ax.set_ylabel("True label")
     ax.set_xticks(np.arange(len(class_names)))
@@ -172,32 +201,35 @@ def plot_confusion_matrix_heatmap(
     ax.set_xticklabels(class_names, rotation=45, ha="right")
     ax.set_yticklabels(class_names)
 
-    for i in range(cm_plot.shape[0]):
-        for j in range(cm_plot.shape[1]):
-            text_val = f"{cm_plot[i, j]:.2f}" if normalize else f"{int(cm_plot[i, j])}"
-            ax.text(j, i, text_val, ha="center", va="center")
+    for i in range(cm_raw.shape[0]):
+        for j in range(cm_raw.shape[1]):
+            ax.text(j, i, f"{int(cm_raw[i, j])}", ha="center", va="center")
 
-    fig.colorbar(im, ax=ax)
-    plt.tight_layout()
+    fig.colorbar(im0, ax=ax, fraction=0.046, pad=0.04)
 
-    if save_path:
-        save_path = Path(save_path)
-        ensure_dir(save_path.parent)
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    # -------------------------------------------------
+    # 2) Normalized confusion matrix
+    # -------------------------------------------------
+    ax = axes[1]
+    im1 = ax.imshow(cm_norm)
+    ax.set_title("Confusion Matrix (Normalized)")
+    ax.set_xlabel("Predicted label")
+    ax.set_ylabel("True label")
+    ax.set_xticks(np.arange(len(class_names)))
+    ax.set_yticks(np.arange(len(class_names)))
+    ax.set_xticklabels(class_names, rotation=45, ha="right")
+    ax.set_yticklabels(class_names)
 
-    plt.show()
+    for i in range(cm_norm.shape[0]):
+        for j in range(cm_norm.shape[1]):
+            ax.text(j, i, f"{cm_norm[i, j]:.2f}", ha="center", va="center")
 
+    fig.colorbar(im1, ax=ax, fraction=0.046, pad=0.04)
 
-def plot_multiclass_roc(
-    y_true: np.ndarray,
-    y_prob: np.ndarray,
-    class_names: list[str],
-    save_path: str | Path | None = None,
-):
-    y_true_bin = label_binarize(y_true, classes=np.arange(len(class_names)))
-
-    fig, ax = plt.subplots(figsize=(7, 6))
-
+    # -------------------------------------------------
+    # 3) ROC
+    # -------------------------------------------------
+    ax = axes[2]
     for i, class_name in enumerate(class_names):
         if len(np.unique(y_true_bin[:, i])) < 2:
             continue
@@ -211,6 +243,7 @@ def plot_multiclass_roc(
     ax.set_xlabel("False Positive Rate")
     ax.set_ylabel("True Positive Rate")
     ax.legend(loc="lower right")
+
     plt.tight_layout()
 
     if save_path:
@@ -279,7 +312,15 @@ def save_misclassified_examples(
 
     if len(wrong_idx) == 0:
         print("[INFO] No misclassified samples found.")
-        return pd.DataFrame(columns=["filepath", "true_label", "pred_label", "true_name", "pred_name"])
+        return pd.DataFrame(
+            columns=[
+                "filepath",
+                "true_label",
+                "pred_label",
+                "true_name",
+                "pred_name",
+            ]
+        )
 
     subset_idx = wrong_idx[:max_examples]
 
@@ -288,7 +329,12 @@ def save_misclassified_examples(
     cols = min(4, n)
     rows_n = int(np.ceil(n / cols))
 
-    fig, axes = plt.subplots(rows_n, cols, figsize=(4 * cols, 4 * rows_n), squeeze=False)
+    fig, axes = plt.subplots(
+        rows_n,
+        cols,
+        figsize=(4 * cols, 4 * rows_n),
+        squeeze=False,
+    )
 
     for plot_i, idx in enumerate(subset_idx):
         r = plot_i // cols
@@ -355,11 +401,12 @@ def run_evaluation(
     model_path = Path(model_path)
     out_dir = ensure_dir(out_dir)
     class_names = get_class_names()
+    model_name = infer_model_name(model_path)
 
     print("=" * 80)
-    print("EVALUATION")
+    print(f"EVALUATION - {model_name}")
     print("=" * 80)
-    print(f"Model: {model_path}")
+    print(f"Model path: {model_path}")
     print(f"Split dir: {split_dir}")
     print(f"Output dir: {out_dir}")
     print("=" * 80)
@@ -367,7 +414,7 @@ def run_evaluation(
     # -----------------------------------------------------
     # load model
     # -----------------------------------------------------
-    model = tf.keras.models.load_model(model_path, safe_mode = False)
+    model = tf.keras.models.load_model(model_path, safe_mode=False)
 
     # -----------------------------------------------------
     # dataset
@@ -392,18 +439,28 @@ def run_evaluation(
     # -----------------------------------------------------
     y_true, y_pred, y_prob = collect_predictions(model, test_ds)
 
-    extra_metrics = compute_metrics(y_true, y_pred)
+    extra_metrics = compute_metrics(
+        y_true,
+        y_pred,
+        loss=loss,
+        y_prob=y_prob,
+        num_classes=NUM_CLASSES,
+    )
     recall = extra_metrics["recall_macro"]
     f1 = extra_metrics["f1_macro"]
+    roc_auc_macro_ovr = extra_metrics.get("roc_auc_macro_ovr", float("nan"))
 
     # -----------------------------------------------------
     # save summary
     # -----------------------------------------------------
     results = {
+        "model_name": model_name,
+        "model_path": str(model_path),
         "loss": loss,
         "accuracy": accuracy,
         "recall_macro": recall,
         "f1_macro": f1,
+        "roc_auc_macro_ovr": roc_auc_macro_ovr,
         "n_samples": int(len(test_df)),
         "num_classes": int(NUM_CLASSES),
         "class_names": class_names,
@@ -431,20 +488,6 @@ def run_evaluation(
     cm = confusion_matrix(y_true, y_pred, labels=np.arange(len(class_names)))
     np.save(out_dir / "confusion_matrix.npy", cm)
 
-    plot_confusion_matrix_heatmap(
-        cm=cm,
-        class_names=class_names,
-        normalize=False,
-        save_path=out_dir / "confusion_matrix.png",
-    )
-
-    plot_confusion_matrix_heatmap(
-        cm=cm,
-        class_names=class_names,
-        normalize=True,
-        save_path=out_dir / "confusion_matrix_normalized.png",
-    )
-
     # -----------------------------------------------------
     # classification report
     # -----------------------------------------------------
@@ -459,25 +502,26 @@ def run_evaluation(
     print(report_text)
 
     # -----------------------------------------------------
-    # ROC
+    # ROC AUC
     # -----------------------------------------------------
-    try:
-        auc_macro_ovr = roc_auc_score(
-            label_binarize(y_true, classes=np.arange(len(class_names))),
-            y_prob,
-            multi_class="ovr",
-            average="macro",
+    if np.isnan(roc_auc_macro_ovr):
+        print("[WARN] ROC AUC számítás nem sikerült.")
+    else:
+        save_json(
+            {"roc_auc_macro_ovr": float(roc_auc_macro_ovr)},
+            out_dir / "roc_auc.json",
         )
-        save_json({"roc_auc_macro_ovr": float(auc_macro_ovr)}, out_dir / "roc_auc.json")
-        print(f"[INFO] ROC AUC macro OVR: {auc_macro_ovr:.4f}")
-    except Exception as e:
-        print(f"[WARN] ROC AUC számítás nem sikerült: {e}")
+        print(f"[INFO] ROC AUC macro OVR: {roc_auc_macro_ovr:.4f}")
 
-    plot_multiclass_roc(
+    # -----------------------------------------------------
+    # combined evaluation row
+    # -----------------------------------------------------
+    plot_evaluation_row(
+        cm=cm,
         y_true=y_true,
         y_prob=y_prob,
         class_names=class_names,
-        save_path=out_dir / "roc_multiclass.png",
+        save_path=out_dir / "evaluation_row.png",
     )
 
     # -----------------------------------------------------
@@ -500,9 +544,7 @@ def run_evaluation(
         "out_dir": out_dir,
         "metrics_json": out_dir / "evaluation_metrics.json",
         "metrics_row_png": out_dir / "metrics_row.png",
-        "confusion_matrix_png": out_dir / "confusion_matrix.png",
-        "confusion_matrix_norm_png": out_dir / "confusion_matrix_normalized.png",
-        "roc_png": out_dir / "roc_multiclass.png",
+        "evaluation_row_png": out_dir / "evaluation_row.png",
         "classification_report_csv": out_dir / "classification_report.csv",
         "misclassified_csv": out_dir / "misclassified" / "misclassified_examples.csv",
     }
@@ -514,7 +556,7 @@ def run_evaluation(
 
 if __name__ == "__main__":
     run_evaluation(
-        model_path=MODELS_DIR / "resnet50/best_model.keras",
-        split_dir=SPLIT_DIR,
-        out_dir=OUTPUT_DIR / "evaluation/resnet50",
+        model_path=MODELS_DIR / "resnet50" / "best_model.keras",
+        split_dir=SPLITS_DIR,
+        out_dir=OUTPUT_DIR / "evaluation" / "resnet50",
     )
