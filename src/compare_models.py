@@ -19,7 +19,7 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import label_binarize
 
-from src.config import BATCH_SIZE, CLASS_INFOS, IMAGE_SIZE, NUM_CLASSES, SEED, ensure_dir, get_class_names, save_json
+from src.config import BATCH_SIZE, CLASS_INFOS, IMAGE_SIZE, NUM_CLASSES, SEED, MODELS_DIR, SPLITS_DIR, ensure_dir, get_class_names, save_json
 from src.evaluate import collect_predictions, compute_metrics
 from src.dataloader import build_datasets_from_split_csvs
 
