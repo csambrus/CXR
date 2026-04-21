@@ -649,7 +649,7 @@ def run_multiple_models(
     rows = []
 
     for model_name in model_names:
-
+        model_dir = Path(out_dir) / model_name.lower()
         if is_training_complete(model_dir):
             print(f"[SKIP] {model_name} already completed: {model_dir}")
 
