@@ -442,6 +442,16 @@ def evaluate_and_save(
     return metrics
 
 
+def is_training_complete(model_out_dir: str | Path) -> bool:
+    model_out_dir = Path(model_out_dir)
+
+    required_files = [
+        model_out_dir / "final_model.keras",
+        model_out_dir / "metrics.json",
+        model_out_dir / "training_config.json",
+    ]
+    return all(p.exists() for p in required_files)
+
 # =========================================================
 # Training
 # =========================================================
@@ -639,6 +649,27 @@ def run_multiple_models(
     rows = []
 
     for model_name in model_names:
+
+        if is_training_complete(model_dir):
+            print(f"[SKIP] {model_name} already completed: {model_dir}")
+
+            metrics_path = model_dir / "metrics.json"
+            if m   etrics_path.exists():
+                with open(metrics_path, "r", encoding="utf-8") as f:
+                    saved_metrics = json.load(f)
+                row = {
+                    "model_name": model_name,
+                    "train_loss": saved_metrics["train"]["loss"],
+                    "train_accuracy": saved_metrics["train"]["accuracy"],
+                    "val_loss": saved_metrics["val"]["loss"],
+                    "val_accuracy": saved_metrics["val"]["accuracy"],
+                    "test_loss": saved_metrics["test"]["loss"],
+                    "test_accuracy": saved_metrics["test"]["accuracy"],
+                    "out_dir": str(model_dir),
+                }
+                rows.append(row)
+            continue
+        
         result = run_training(
             split_dir=split_dir,
             out_dir=out_dir,
