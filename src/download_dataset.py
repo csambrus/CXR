@@ -1,131 +1,80 @@
-# src/download_dataset.py
 from __future__ import annotations
 
 import shutil
+import tempfile
 from pathlib import Path
+
 import kagglehub
 
-from src.config import RAW_DIR, SEGMENTATION_RAW_DIR, DATA_DIR, ensure_dir
+from src.config import RAW_DIR, SEGMENTATION_RAW_DIR, ensure_dir
 
 
 # =========================================================
-# DATASET SLUGS
+# Kaggle dataset azonosítók
 # =========================================================
 
-# Classifier dataset (4 classes)
-COVID_SLUG = "unaissait/curated-chest-xray-image-dataset-for-covid19"
-
-# Segmentation dataset (lung masks)
-CRD_SLUG = "mrunalnshah/crd-chest-x-ray-images-with-lung-segmented-masks"
+COVID_CRD_SLUG = "unaissait/curated-chest-xray-image-dataset-for-covid19"
+CRD_SEG_SLUG = "mrunalnshah/crd-chest-x-ray-images-with-lung-segmented-masks"
 
 
 # =========================================================
-# PATHS
+# Marker fájlok
 # =========================================================
 
-# Main classifier dataset
-COVID_TMP_DIR = RAW_DIR / "_tmp_download"
 COVID_READY_MARKER = RAW_DIR / ".dataset_ready"
+SEG_READY_MARKER = SEGMENTATION_RAW_DIR / ".dataset_ready"
 
-COVID_EXPECTED_FOLDERS = [
-    "COVID-19",
-    "Normal",
-    "Pneumonia-Bacterial",
-    "Pneumonia-Viral",
-]
-
-# Segmentation dataset
-CRD_DIR = SEGMENTATION_RAW_DIR / "crd_lung_masks"
-CRD_READY_MARKER = CRD_DIR / ".dataset_ready"
 
 # =========================================================
-# HELPERS
+# Általános utilok
 # =========================================================
 
-def safe_download(slug: str, out_dir: Path) -> Path:
-    """
-    Downloads dataset with kagglehub.
-    Requires Kaggle authentication in Colab / local environment.
-    """
-    ensure_dir(out_dir)
-
-    print("=" * 72)
-    print(f"[INFO] Downloading dataset: {slug}")
-    print(f"[INFO] Output dir        : {out_dir}")
-    print("=" * 72)
-
-    try:
-        path = kagglehub.dataset_download(
-            slug,
-            output_dir=out_dir,
-        )
-    except Exception as e:
-        raise RuntimeError(
-            f"\n[ERROR] Failed to download dataset: {slug}\n"
-            "Possible reasons:\n"
-            "1. Missing Kaggle authentication (kaggle.json)\n"
-            "2. Dataset requires Kaggle consent\n"
-            "3. Wrong dataset slug\n"
-            f"\nOriginal error:\n{e}"
-        ) from e
-
-    path = Path(path)
-
-    print("[OK] Download finished:", path)
-    return path
-
-
-def touch(path: Path):
-    ensure_dir(path.parent)
+def touch(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.touch(exist_ok=True)
 
 
-def folder_has_any_files(folder: Path) -> bool:
-    if not folder.exists():
-        return False
-
-    for p in folder.rglob("*"):
-        if p.is_file():
-            return True
-    return False
+def remove_if_exists(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
+    elif path.exists():
+        path.unlink(missing_ok=True)
 
 
-# =========================================================
-# CLASSIFIER DATASET CHECK
-# =========================================================
-
-def covid_exists() -> bool:
+def copytree_merge(src: Path, dst: Path) -> None:
     """
-    Checks if the main 4-class classifier dataset already exists.
+    Python 3.8+ kompatibilis merge-szerű másolás.
+    Ha a cél nem létezik, simán másol.
+    Ha létezik, a hiányzó fájlokat/mappákat belemozgatja.
     """
-    if COVID_READY_MARKER.exists():
-        return True
+    dst.mkdir(parents=True, exist_ok=True)
 
-    return all((RAW_DIR / name).exists() for name in COVID_EXPECTED_FOLDERS)
+    for item in src.iterdir():
+        target = dst / item.name
+        if item.is_dir():
+            copytree_merge(item, target)
+        else:
+            if target.exists():
+                continue
+            shutil.copy2(item, target)
 
 
 # =========================================================
-# SEGMENTATION DATASET CHECK
+# Classifier dataset mozgatása
 # =========================================================
 
-def crd_exists() -> bool:
+def move_classifier_dataset(tmp_root: Path) -> None:
     """
-    Checks if CRD segmentation dataset already exists.
-    """
-    if CRD_READY_MARKER.exists():
-        return True
+    Kaggle dataset tipikusan így bontódik ki:
 
-    return folder_has_any_files(CRD_DIR)
+    tmp_root/
+        Curated X-Ray Dataset/
+            Normal/
+            COVID-19/
+            Pneumonia-Bacterial/
+            Pneumonia-Viral/
 
-
-# =========================================================
-# DOWNLOAD CLASSIFIER DATASET
-# =========================================================
-
-def move_classifier_dataset(tmp_root: Path):
-    """
-    Kaggle dataset typically extracts into:
-    Curated X-Ray Dataset/
+    vagy esetenként közvetlenül a tmp_root alá.
     """
     possible_roots = [
         tmp_root / "Curated X-Ray Dataset",
@@ -145,6 +94,8 @@ def move_classifier_dataset(tmp_root: Path):
 
     print("[INFO] Moving classifier dataset into RAW_DIR...")
 
+    moved_any = False
+
     for item in src_root.iterdir():
         if not item.is_dir():
             continue
@@ -157,110 +108,185 @@ def move_classifier_dataset(tmp_root: Path):
 
         shutil.move(str(item), str(target))
         print(f"[OK] Moved: {item.name}")
+        moved_any = True
+
+    if not moved_any:
+        print("[WARN] No new classifier folders were moved.")
 
     touch(COVID_READY_MARKER)
 
 
-def download_classifier_dataset(force: bool = False):
+# =========================================================
+# Segmentation dataset mozgatása
+# =========================================================
+
+def move_segmentation_dataset(
+    tmp_root: Path,
+    move_only_combined: bool = True,
+) -> None:
     """
-    Downloads the COVID / pneumonia classifier dataset.
+    Kaggle dataset tipikusan így bontódik ki:
+
+    tmp_root/
+        crd_lung_masks/
+            CXR_Combined/
+            CXR_Combined_masks/
+            CXR_RadioLucent/
+            CXR_RadioLucent_masks/
+            CXR_RadioOpaque/
+            CXR_RadioOpaque_masks/
+
+    vagy esetenként közvetlenül a tmp_root alá.
     """
-    if covid_exists() and not force:
-        print("[SKIP] Classifier dataset already exists.")
-        return
+    possible_roots = [
+        tmp_root / "crd_lung_masks",
+        tmp_root,
+    ]
 
-    if force and RAW_DIR.exists():
-        print("[INFO] Force mode enabled.")
+    src_root = None
+    for p in possible_roots:
+        if p.exists():
+            src_root = p
+            break
 
-    ensure_dir(RAW_DIR)
-    ensure_dir(COVID_TMP_DIR)
-
-    safe_download(COVID_SLUG, COVID_TMP_DIR)
-    move_classifier_dataset(COVID_TMP_DIR)
-
-    shutil.rmtree(COVID_TMP_DIR, ignore_errors=True)
-
-    print("[OK] Classifier dataset ready:", RAW_DIR)
-
-
-# =========================================================
-# DOWNLOAD SEGMENTATION DATASET
-# =========================================================
-
-def download_segmentation_dataset(force: bool = False):
-    """
-    Downloads CRD lung segmentation dataset.
-    """
-    if crd_exists() and not force:
-        print("[SKIP] Segmentation dataset already exists.")
-        return
-
-    ensure_dir(CRD_DIR)
-
-    safe_download(CRD_SLUG, CRD_DIR)
-
-    touch(CRD_READY_MARKER)
-
-    print("[OK] Segmentation dataset ready:", CRD_DIR)
-
-
-# =========================================================
-# SUMMARY
-# =========================================================
-
-def print_dataset_summary():
-    print("\n" + "=" * 72)
-    print("DATASET SUMMARY")
-    print("=" * 72)
-
-    print("Classifier dataset:")
-    print(" Ready:", covid_exists())
-    print(" Path :", RAW_DIR)
-
-    print("\nSegmentation dataset:")
-    print(" Ready:", crd_exists())
-    print(" Path :", CRD_DIR)
-
-    print("=" * 72)
-
-
-# =========================================================
-# MAIN ENTRY
-# =========================================================
-
-def download_dataset(
-    classifier: bool = True,
-    segmentation: bool = True,
-    force: bool = False,
-):
-    """
-    Downloads requested datasets.
-
-    Example:
-        download_dataset()
-
-    Only segmentation:
-        download_dataset(
-            include_classifier=False,
-            include_segmentation=True,
+    if src_root is None:
+        raise RuntimeError(
+            f"[ERROR] Could not locate extracted segmentation dataset in: {tmp_root}"
         )
-    """
-    if classifier:
-        download_classifier_dataset(force=force)
 
-    if segmentation:
-        download_segmentation_dataset(force=force)
+    print("[INFO] Moving segmentation dataset into SEGMENTATION_RAW_DIR...")
 
-    print_dataset_summary()
+    if move_only_combined:
+        folders_to_move = [
+            "CXR_Combined",
+            "CXR_Combined_masks",
+        ]
+    else:
+        folders_to_move = [
+            "CXR_Combined",
+            "CXR_Combined_masks",
+            "CXR_RadioLucent",
+            "CXR_RadioLucent_masks",
+            "CXR_RadioOpaque",
+            "CXR_RadioOpaque_masks",
+        ]
+
+    moved_any = False
+
+    for folder_name in folders_to_move:
+        src = src_root / folder_name
+        dst = SEGMENTATION_RAW_DIR / folder_name
+
+        if not src.exists():
+            print(f"[WARN] Missing: {src}")
+            continue
+
+        if dst.exists():
+            print(f"[SKIP] Already exists: {dst}")
+            continue
+
+        shutil.move(str(src), str(dst))
+        print(f"[OK] Moved: {folder_name}")
+        moved_any = True
+
+    if not moved_any:
+        print("[WARN] No new segmentation folders were moved.")
+
+    touch(SEG_READY_MARKER)
 
 
 # =========================================================
-# CLI
+# Letöltés
+# =========================================================
+
+def _download_to_temp(slug: str) -> Path:
+    """
+    KaggleHub letöltés temp helyre.
+    A kagglehub.dataset_download egy cache-elt lokációt ad vissza.
+    Innen egy ideiglenes munkakönyvtárba másolunk, hogy biztonságosan
+    tudjunk move-olni.
+    """
+    downloaded_path = Path(kagglehub.dataset_download(slug))
+    print(f"[INFO] KaggleHub downloaded/cached at: {downloaded_path}")
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="cxr_download_"))
+    print(f"[INFO] Temporary working dir: {tmp_dir}")
+
+    if downloaded_path.is_dir():
+        copytree_merge(downloaded_path, tmp_dir)
+    else:
+        raise RuntimeError(f"[ERROR] Downloaded path is not a directory: {downloaded_path}")
+
+    return tmp_dir
+
+
+def download_classifier_dataset(force: bool = False) -> None:
+    ensure_dir(RAW_DIR)
+
+    if COVID_READY_MARKER.exists() and not force:
+        print("[SKIP] Classifier dataset already exists, no download needed.")
+        return
+
+    if force:
+        print("[INFO] Force download requested for classifier dataset.")
+        remove_if_exists(COVID_READY_MARKER)
+
+    tmp_dir = None
+    try:
+        tmp_dir = _download_to_temp(COVID_CRD_SLUG)
+        move_classifier_dataset(tmp_dir)
+        print("[OK] Classifier dataset ready.")
+    finally:
+        if tmp_dir is not None and tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def download_segmentation_dataset(
+    force: bool = False,
+    move_only_combined: bool = True,
+) -> None:
+    ensure_dir(SEGMENTATION_RAW_DIR)
+
+    if SEG_READY_MARKER.exists() and not force:
+        print("[SKIP] Segmentation dataset already exists, no download needed.")
+        return
+
+    if force:
+        print("[INFO] Force download requested for segmentation dataset.")
+        remove_if_exists(SEG_READY_MARKER)
+
+    tmp_dir = None
+    try:
+        tmp_dir = _download_to_temp(CRD_SEG_SLUG)
+        move_segmentation_dataset(
+            tmp_root=tmp_dir,
+            move_only_combined=move_only_combined,
+        )
+        print("[OK] Segmentation dataset ready.")
+    finally:
+        if tmp_dir is not None and tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def download_all_datasets(
+    force_classifier: bool = False,
+    force_segmentation: bool = False,
+    move_only_combined: bool = True,
+) -> None:
+    download_classifier_dataset(force=force_classifier)
+    download_segmentation_dataset(
+        force=force_segmentation,
+        move_only_combined=move_only_combined,
+    )
+
+
+# =========================================================
+# CLI futtatás
 # =========================================================
 
 if __name__ == "__main__":
-    download_dataset(
-        classifier=True,
-        segmentation=True,
-        force=False,
+    download_all_datasets(
+        force_classifier=False,
+        force_segmentation=False,
+        move_only_combined=True,
     )
