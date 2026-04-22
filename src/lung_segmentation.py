@@ -1,8 +1,7 @@
-# src/lung_segmentation.py
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Sequence, Any
+from typing import Sequence, Any
 import json
 import random
 
@@ -14,10 +13,9 @@ from PIL import Image
 import tensorflow as tf
 
 from src.config import (
+    DATA_DIR,
     RAW_DIR,
-    SEGMENTATION_RAW_DIR,
     SEGMENTATION_DATA_DIR,
-    SEGMENTATION_SPLITS_DIR,
     SEGMENTATION_MODELS_DIR,
     LUNG_MASK_DIR,
     LUNG_MASKED_DIR,
@@ -36,24 +34,28 @@ AUTOTUNE = tf.data.AUTOTUNE
 # Paths
 # =========================================================
 
-MONT_DIR = SEGMENTATION_RAW_DIR / "montgomery"
-SHEN_DIR = SEGMENTATION_RAW_DIR / "shenzhen"
+SEG_RAW_DIR = DATA_DIR / "segmentation_raw"
+CRD_DIR = SEG_RAW_DIR / "crd_lung_masks"
 
-MERGED_DIR = SEGMENTATION_RAW_DIR / "merged"
+MERGED_DIR = SEGMENTATION_DATA_DIR / "merged"
 MERGED_IMAGES_DIR = MERGED_DIR / "images"
 MERGED_MASKS_DIR = MERGED_DIR / "masks"
 
+SPLIT_DIR = SEGMENTATION_DATA_DIR / "splits"
+SEG_MODEL_DIR = SEGMENTATION_MODELS_DIR / "lung_unet"
+
+
 # =========================================================
-# Utils
+# General utils
 # =========================================================
 
-def set_seed(seed: int = SEED):
+def set_seed(seed: int = SEED) -> None:
     random.seed(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
 
 
-def save_json(data: dict, path: str | Path):
+def save_json(data: dict, path: str | Path) -> None:
     path = Path(path)
     ensure_dir(path.parent)
     with open(path, "w", encoding="utf-8") as f:
@@ -77,69 +79,48 @@ def open_gray(path: str | Path) -> np.ndarray:
     return np.array(img)
 
 
-def save_gray(arr: np.ndarray, path: str | Path):
+def save_gray(arr: np.ndarray, path: str | Path) -> None:
     path = Path(path)
     ensure_dir(path.parent)
     Image.fromarray(arr.astype(np.uint8)).save(path)
 
 
 # =========================================================
-# Dataset detection
+# CRD dataset detection / pairing
 # =========================================================
 
-def find_montgomery_structure(root: Path) -> tuple[Path, Path] | None:
-    candidates_img = [
-        root / "CXR_png",
+def find_crd_structure(root: Path) -> tuple[Path, Path] | None:
+    """
+    Tries to find the image and mask folders in the CRD dataset.
+    Add more candidates here if the downloaded folder structure differs.
+    """
+    image_candidates = [
         root / "images",
+        root / "Images",
+        root / "image",
+        root / "Image",
+        root / "CXR",
+        root / "cxr",
+        root / "train" / "images",
+        root / "data" / "images",
+        root / "CRD",
     ]
 
-    candidates_mask = [
-        root / "ManualMask" / "leftMask",
-        root / "Masks" / "left",
-    ]
-
-    img_dir = None
-    left_dir = None
-
-    for p in candidates_img:
-        if p.exists():
-            img_dir = p
-            break
-
-    for p in candidates_mask:
-        if p.exists():
-            left_dir = p
-            break
-
-    if img_dir is None or left_dir is None:
-        return None
-
-    return img_dir, left_dir
-
-
-def find_shenzhen_structure(root: Path) -> tuple[Path, Path] | None:
-    candidates_img = [
-        root / "ChinaSet_AllFiles" / "CXR_png",
-        root / "images",
-    ]
-
-    candidates_mask = [
-        root / "ChinaSet_AllFiles" / "ManualMask",
+    mask_candidates = [
         root / "masks",
+        root / "Masks",
+        root / "mask",
+        root / "Mask",
+        root / "lung_masks",
+        root / "LungMasks",
+        root / "lung_mask",
+        root / "train" / "masks",
+        root / "data" / "masks",
+        root / "segmentation_masks",
     ]
 
-    img_dir = None
-    mask_dir = None
-
-    for p in candidates_img:
-        if p.exists():
-            img_dir = p
-            break
-
-    for p in candidates_mask:
-        if p.exists():
-            mask_dir = p
-            break
+    img_dir = next((p for p in image_candidates if p.exists()), None)
+    mask_dir = next((p for p in mask_candidates if p.exists()), None)
 
     if img_dir is None or mask_dir is None:
         return None
@@ -147,157 +128,152 @@ def find_shenzhen_structure(root: Path) -> tuple[Path, Path] | None:
     return img_dir, mask_dir
 
 
+def find_mask_for_image(img_path: Path, mask_dir: Path) -> Path | None:
+    stem = img_path.stem
+
+    candidates = [
+        mask_dir / f"{stem}.png",
+        mask_dir / f"{stem}.jpg",
+        mask_dir / f"{stem}.jpeg",
+        mask_dir / f"{stem}.bmp",
+        mask_dir / f"{stem}.tif",
+        mask_dir / f"{stem}.tiff",
+        mask_dir / f"{stem}_mask.png",
+        mask_dir / f"{stem}_mask.jpg",
+        mask_dir / f"{stem}_mask.jpeg",
+        mask_dir / f"{stem}_mask.bmp",
+        mask_dir / f"{stem}_mask.tif",
+        mask_dir / f"{stem}_mask.tiff",
+    ]
+
+    for p in candidates:
+        if p.exists():
+            return p
+
+    return None
+
+
 # =========================================================
-# Prepare merged segmentation dataset
+# Dataset preparation
 # =========================================================
 
-def merge_montgomery():
-    if not MONT_DIR.exists():
-        print("[SKIP] Montgomery folder missing:", MONT_DIR)
-        return 0
+def prepare_segmentation_dataset() -> int:
+    """
+    Converts the raw CRD dataset into a clean merged/images + merged/masks structure.
+    """
+    ensure_dir(MERGED_IMAGES_DIR)
+    ensure_dir(MERGED_MASKS_DIR)
 
-    found = find_montgomery_structure(MONT_DIR)
+    if not CRD_DIR.exists():
+        raise RuntimeError(
+            f"[ERROR] CRD dataset folder not found: {CRD_DIR}\n"
+            "Download it first into DATA_DIR / segmentation_raw / crd_lung_masks."
+        )
+
+    found = find_crd_structure(CRD_DIR)
     if found is None:
-        print("[WARN] Could not detect Montgomery structure.")
-        return 0
-
-    img_dir, left_dir = found
-    right_dir = left_dir.parent / "rightMask"
-
-    count = 0
-
-    for img_path in list_images(img_dir):
-        stem = img_path.stem
-
-        left_mask = right_dir.parent / "leftMask" / f"{stem}.png"
-        right_mask = right_dir / f"{stem}.png"
-
-        if not left_mask.exists() or not right_mask.exists():
-            continue
-
-        img = open_gray(img_path)
-        lm = open_gray(left_mask)
-        rm = open_gray(right_mask)
-
-        mask = np.maximum(lm, rm)
-        mask = (mask > 0).astype(np.uint8) * 255
-
-        out_img = MERGED_IMAGES_DIR / f"mont_{stem}.png"
-        out_mask = MERGED_MASKS_DIR / f"mont_{stem}.png"
-
-        save_gray(img, out_img)
-        save_gray(mask, out_mask)
-        count += 1
-
-    print(f"[OK] Montgomery merged: {count}")
-    return count
-
-
-def merge_shenzhen():
-    if not SHEN_DIR.exists():
-        print("[SKIP] Shenzhen folder missing:", SHEN_DIR)
-        return 0
-
-    found = find_shenzhen_structure(SHEN_DIR)
-    if found is None:
-        print("[WARN] Could not detect Shenzhen structure.")
-        return 0
+        raise RuntimeError(
+            "[ERROR] Could not detect CRD dataset structure.\n"
+            f"Inspect this folder and extend find_crd_structure(): {CRD_DIR}"
+        )
 
     img_dir, mask_dir = found
+    image_files = list_images(img_dir)
+
+    if len(image_files) == 0:
+        raise RuntimeError(f"[ERROR] No images found in: {img_dir}")
 
     count = 0
+    missing_masks = 0
 
-    for img_path in list_images(img_dir):
-        stem = img_path.stem
-
-        possible_masks = [
-            mask_dir / f"{stem}.png",
-            mask_dir / f"{stem}_mask.png",
-        ]
-
-        mask_path = None
-        for p in possible_masks:
-            if p.exists():
-                mask_path = p
-                break
-
+    for img_path in image_files:
+        mask_path = find_mask_for_image(img_path, mask_dir)
         if mask_path is None:
+            missing_masks += 1
             continue
 
         img = open_gray(img_path)
         mask = open_gray(mask_path)
+
         mask = (mask > 0).astype(np.uint8) * 255
 
-        out_img = MERGED_IMAGES_DIR / f"shen_{stem}.png"
-        out_mask = MERGED_MASKS_DIR / f"shen_{stem}.png"
+        out_img = MERGED_IMAGES_DIR / f"{img_path.stem}.png"
+        out_mask = MERGED_MASKS_DIR / f"{img_path.stem}.png"
 
         save_gray(img, out_img)
         save_gray(mask, out_mask)
         count += 1
 
-    print(f"[OK] Shenzhen merged: {count}")
+    summary = {
+        "source_root": str(CRD_DIR),
+        "image_dir": str(img_dir),
+        "mask_dir": str(mask_dir),
+        "num_images_found": len(image_files),
+        "num_pairs_saved": count,
+        "num_missing_masks": missing_masks,
+    }
+    save_json(summary, MERGED_DIR / "prepare_summary.json")
+
+    print(f"[OK] Prepared segmentation dataset: {count} pairs")
+    if missing_masks:
+        print(f"[WARN] Missing masks for {missing_masks} images")
+
     return count
 
 
-def prepare_segmentation_dataset():
-    ensure_dir(MERGED_IMAGES_DIR)
-    ensure_dir(MERGED_MASKS_DIR)
-
-    c1 = merge_montgomery()
-    c2 = merge_shenzhen()
-
-    total = c1 + c2
-    print(f"[OK] Total merged dataset size: {total}")
-    return total
-
-
 # =========================================================
-# Split
+# Splits
 # =========================================================
 
 def create_splits(
     val_ratio: float = 0.15,
     test_ratio: float = 0.15,
     seed: int = SEED,
-):
+) -> dict[str, int]:
     set_seed(seed)
 
-    images = list_images(MERGED_IMAGES_DIR)
-    stems = [p.stem for p in images]
+    image_files = list_images(MERGED_IMAGES_DIR)
+    ids = [p.stem for p in image_files]
 
-    random.shuffle(stems)
+    if len(ids) == 0:
+        raise RuntimeError(
+            "[ERROR] No prepared segmentation images found. "
+            "Run prepare_segmentation_dataset() first."
+        )
 
-    n = len(stems)
+    random.shuffle(ids)
+
+    n = len(ids)
     n_test = int(n * test_ratio)
     n_val = int(n * val_ratio)
 
-    test_ids = stems[:n_test]
-    val_ids = stems[n_test:n_test + n_val]
-    train_ids = stems[n_test + n_val:]
+    test_ids = ids[:n_test]
+    val_ids = ids[n_test:n_test + n_val]
+    train_ids = ids[n_test + n_val:]
 
-    ensure_dir(SEGMENTATION_SPLITS_DIR)
+    ensure_dir(SPLIT_DIR)
 
-    for name, ids in {
-        "train": train_ids,
-        "val": val_ids,
-        "test": test_ids,
-    }.items():
-        pd.DataFrame({"id": ids}).to_csv(SEGMENTATION_SPLITS_DIR / f"{name}.csv", index=False)
+    pd.DataFrame({"id": train_ids}).to_csv(SPLIT_DIR / "train.csv", index=False)
+    pd.DataFrame({"id": val_ids}).to_csv(SPLIT_DIR / "val.csv", index=False)
+    pd.DataFrame({"id": test_ids}).to_csv(SPLIT_DIR / "test.csv", index=False)
 
-    print("[OK] Splits saved:", SEGMENTATION_SPLITS_DIR)
-
-    return {
+    summary = {
         "train": len(train_ids),
         "val": len(val_ids),
         "test": len(test_ids),
+        "total": n,
     }
+    save_json(summary, SPLIT_DIR / "split_summary.json")
+
+    print("[OK] Segmentation splits created:", summary)
+    return summary
 
 
 # =========================================================
-# TF loader
+# TF data pipeline
 # =========================================================
 
-def load_pair(img_path, mask_path):
+def load_pair(img_path: tf.Tensor, mask_path: tf.Tensor):
     img = tf.io.read_file(img_path)
     img = tf.image.decode_png(img, channels=1)
     img = tf.image.resize(img, IMAGE_SIZE)
@@ -311,8 +287,28 @@ def load_pair(img_path, mask_path):
     return img, mask
 
 
-def build_dataset(split_name: str):
-    df = pd.read_csv(SEGMENTATION_SPLITS_DIR / f"{split_name}.csv")
+def augment_pair(image: tf.Tensor, mask: tf.Tensor):
+    # shared flip
+    flip = tf.random.uniform(()) > 0.5
+    image = tf.cond(flip, lambda: tf.image.flip_left_right(image), lambda: image)
+    mask = tf.cond(flip, lambda: tf.image.flip_left_right(mask), lambda: mask)
+
+    # small brightness/contrast only on image
+    image = tf.image.random_brightness(image, max_delta=0.05)
+    image = tf.image.random_contrast(image, lower=0.95, upper=1.05)
+    image = tf.clip_by_value(image, 0.0, 1.0)
+
+    return image, mask
+
+
+def build_dataset(split_name: str, batch_size: int = BATCH_SIZE) -> tf.data.Dataset:
+    split_csv = SPLIT_DIR / f"{split_name}.csv"
+    if not split_csv.exists():
+        raise RuntimeError(f"[ERROR] Missing split file: {split_csv}")
+
+    df = pd.read_csv(split_csv)
+    if len(df) == 0:
+        raise RuntimeError(f"[ERROR] Empty split file: {split_csv}")
 
     img_paths = [str(MERGED_IMAGES_DIR / f"{x}.png") for x in df["id"]]
     mask_paths = [str(MERGED_MASKS_DIR / f"{x}.png") for x in df["id"]]
@@ -320,36 +316,39 @@ def build_dataset(split_name: str):
     ds = tf.data.Dataset.from_tensor_slices((img_paths, mask_paths))
 
     if split_name == "train":
-        ds = ds.shuffle(len(df), seed=SEED)
+        ds = ds.shuffle(len(df), seed=SEED, reshuffle_each_iteration=True)
 
     ds = ds.map(load_pair, num_parallel_calls=AUTOTUNE)
 
     if split_name == "train":
-        ds = ds.map(
-            lambda x, y: (
-                tf.image.random_flip_left_right(x),
-                tf.image.random_flip_left_right(y),
-            ),
-            num_parallel_calls=AUTOTUNE,
-        )
+        ds = ds.map(augment_pair, num_parallel_calls=AUTOTUNE)
 
-    ds = ds.batch(BATCH_SIZE).prefetch(AUTOTUNE)
+    ds = ds.batch(batch_size).prefetch(AUTOTUNE)
     return ds
 
 
 # =========================================================
-# Metrics / loss
+# Metrics / losses
 # =========================================================
 
-def dice_coef(y_true, y_pred, smooth=1e-6):
-    y_true_f = tf.reshape(y_true, [-1])
-    y_pred_f = tf.reshape(y_pred, [-1])
+def dice_coef(y_true, y_pred, smooth: float = 1e-6):
+    y_true_f = tf.reshape(tf.cast(y_true, tf.float32), [-1])
+    y_pred_f = tf.reshape(tf.cast(y_pred, tf.float32), [-1])
 
     intersection = tf.reduce_sum(y_true_f * y_pred_f)
+    denom = tf.reduce_sum(y_true_f) + tf.reduce_sum(y_pred_f)
 
-    return (2.0 * intersection + smooth) / (
-        tf.reduce_sum(y_true_f) + tf.reduce_sum(y_pred_f) + smooth
-    )
+    return (2.0 * intersection + smooth) / (denom + smooth)
+
+
+def iou_coef(y_true, y_pred, smooth: float = 1e-6):
+    y_true_f = tf.reshape(tf.cast(y_true, tf.float32), [-1])
+    y_pred_f = tf.reshape(tf.cast(y_pred, tf.float32), [-1])
+
+    intersection = tf.reduce_sum(y_true_f * y_pred_f)
+    union = tf.reduce_sum(y_true_f) + tf.reduce_sum(y_pred_f) - intersection
+
+    return (intersection + smooth) / (union + smooth)
 
 
 def dice_loss(y_true, y_pred):
@@ -365,26 +364,31 @@ def bce_dice_loss(y_true, y_pred):
 # Model
 # =========================================================
 
-def conv_block(x, filters):
-    x = tf.keras.layers.Conv2D(filters, 3, padding="same", activation="relu")(x)
-    x = tf.keras.layers.Conv2D(filters, 3, padding="same", activation="relu")(x)
+def conv_block(x, filters: int):
+    x = tf.keras.layers.Conv2D(filters, 3, padding="same", use_bias=False)(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Activation("relu")(x)
+
+    x = tf.keras.layers.Conv2D(filters, 3, padding="same", use_bias=False)(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Activation("relu")(x)
     return x
 
 
-def encoder_block(x, filters):
+def encoder_block(x, filters: int):
     c = conv_block(x, filters)
     p = tf.keras.layers.MaxPooling2D()(c)
     return c, p
 
 
-def decoder_block(x, skip, filters):
-    x = tf.keras.layers.UpSampling2D()(x)
+def decoder_block(x, skip, filters: int):
+    x = tf.keras.layers.UpSampling2D(interpolation="bilinear")(x)
     x = tf.keras.layers.Concatenate()([x, skip])
     x = conv_block(x, filters)
     return x
 
 
-def build_unet(input_shape=(224, 224, 1)):
+def build_unet(input_shape: tuple[int, int, int] = (224, 224, 1)) -> tf.keras.Model:
     inputs = tf.keras.Input(shape=input_shape)
 
     s1, p1 = encoder_block(inputs, 32)
@@ -401,8 +405,7 @@ def build_unet(input_shape=(224, 224, 1)):
 
     outputs = tf.keras.layers.Conv2D(1, 1, activation="sigmoid")(d4)
 
-    model = tf.keras.Model(inputs, outputs, name="lung_unet")
-    return model
+    return tf.keras.Model(inputs, outputs, name="lung_unet")
 
 
 # =========================================================
@@ -412,19 +415,22 @@ def build_unet(input_shape=(224, 224, 1)):
 def train_segmentation(
     epochs: int = 20,
     learning_rate: float = 1e-3,
-):
-    train_ds = build_dataset("train")
-    val_ds = build_dataset("val")
+    batch_size: int = BATCH_SIZE,
+) -> dict[str, list[float]]:
+    set_seed(SEED)
+
+    train_ds = build_dataset("train", batch_size=batch_size)
+    val_ds = build_dataset("val", batch_size=batch_size)
 
     model = build_unet((IMAGE_SIZE[0], IMAGE_SIZE[1], 1))
 
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
         loss=bce_dice_loss,
-        metrics=[dice_coef],
+        metrics=[dice_coef, iou_coef],
     )
 
-    out_dir = ensure_dir(SEGMENTATION_MODELS_DIR / "lung_unet")
+    out_dir = ensure_dir(SEG_MODEL_DIR)
 
     callbacks = [
         tf.keras.callbacks.ModelCheckpoint(
@@ -439,6 +445,14 @@ def train_segmentation(
             mode="max",
             patience=5,
             restore_best_weights=True,
+            verbose=1,
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss",
+            factor=0.5,
+            patience=2,
+            min_lr=1e-7,
+            verbose=1,
         ),
         tf.keras.callbacks.CSVLogger(str(out_dir / "history.csv")),
     ]
@@ -453,28 +467,113 @@ def train_segmentation(
 
     model.save(out_dir / "last_model.keras")
 
-    return history.history
+    history_dict = history.history
+    save_json(history_dict, out_dir / "history.json")
+
+    return history_dict
+
+
+def evaluate_segmentation(batch_size: int = BATCH_SIZE) -> dict[str, float]:
+    model_path = SEG_MODEL_DIR / "best_model.keras"
+    if not model_path.exists():
+        raise RuntimeError(f"[ERROR] Missing trained model: {model_path}")
+
+    test_ds = build_dataset("test", batch_size=batch_size)
+
+    model = tf.keras.models.load_model(
+        model_path,
+        custom_objects={
+            "dice_coef": dice_coef,
+            "iou_coef": iou_coef,
+            "bce_dice_loss": bce_dice_loss,
+        },
+    )
+
+    result = model.evaluate(test_ds, verbose=1)
+
+    if isinstance(result, list):
+        names = model.metrics_names
+        metrics = {k: float(v) for k, v in zip(names, result)}
+    else:
+        metrics = {"loss": float(result)}
+
+    save_json(metrics, SEG_MODEL_DIR / "test_metrics.json")
+
+    print("[OK] Segmentation test metrics:", metrics)
+    return metrics
 
 
 # =========================================================
 # Visualization
 # =========================================================
 
+def plot_training_history():
+    history_csv = SEG_MODEL_DIR / "history.csv"
+    if not history_csv.exists():
+        raise RuntimeError(f"[ERROR] Missing history file: {history_csv}")
+
+    df = pd.read_csv(history_csv)
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+
+    # loss
+    axes[0].plot(df["loss"], label="train")
+    if "val_loss" in df.columns:
+        axes[0].plot(df["val_loss"], label="val")
+    axes[0].set_title("Loss")
+    axes[0].set_xlabel("Epoch")
+    axes[0].grid(True, alpha=0.3)
+    axes[0].legend()
+
+    # dice
+    if "dice_coef" in df.columns:
+        axes[1].plot(df["dice_coef"], label="train")
+    if "val_dice_coef" in df.columns:
+        axes[1].plot(df["val_dice_coef"], label="val")
+    axes[1].set_title("Dice")
+    axes[1].set_xlabel("Epoch")
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend()
+
+    # iou
+    if "iou_coef" in df.columns:
+        axes[2].plot(df["iou_coef"], label="train")
+    if "val_iou_coef" in df.columns:
+        axes[2].plot(df["val_iou_coef"], label="val")
+    axes[2].set_title("IoU")
+    axes[2].set_xlabel("Epoch")
+    axes[2].grid(True, alpha=0.3)
+    axes[2].legend()
+
+    fig.suptitle("Lung segmentation training history")
+    fig.tight_layout()
+    fig.savefig(SEG_MODEL_DIR / "training_history.png", dpi=PLOT_DPI, bbox_inches="tight")
+    plt.show()
+
+
 def plot_predictions(n: int = 6):
+    model_path = SEG_MODEL_DIR / "best_model.keras"
+    if not model_path.exists():
+        raise RuntimeError(f"[ERROR] Missing trained model: {model_path}")
+
     model = tf.keras.models.load_model(
-        SEGMENTATION_MODELS_DIR / "lung_unet" / "best_model.keras",
+        model_path,
         custom_objects={
             "dice_coef": dice_coef,
+            "iou_coef": iou_coef,
             "bce_dice_loss": bce_dice_loss,
         },
     )
 
-    ds = build_dataset("test").unbatch().take(n)
+    ds = build_dataset("test", batch_size=1).unbatch().take(n)
 
     fig, axes = plt.subplots(n, 3, figsize=(10, 3 * n))
+    if n == 1:
+        axes = np.array([axes])
 
     for i, (img, mask) in enumerate(ds):
         pred = model.predict(img[None, ...], verbose=0)[0, :, :, 0]
+        pred_bin = (pred > 0.5).astype(np.uint8)
 
         axes[i, 0].imshow(img[:, :, 0], cmap="gray")
         axes[i, 0].set_title("Image")
@@ -482,7 +581,7 @@ def plot_predictions(n: int = 6):
         axes[i, 1].imshow(mask[:, :, 0], cmap="gray")
         axes[i, 1].set_title("True Mask")
 
-        axes[i, 2].imshow(pred > 0.5, cmap="gray")
+        axes[i, 2].imshow(pred_bin, cmap="gray")
         axes[i, 2].set_title("Pred Mask")
 
         for j in range(3):
@@ -496,16 +595,32 @@ def plot_predictions(n: int = 6):
 # Inference on classifier dataset
 # =========================================================
 
-def predict_mask(model, img_arr: np.ndarray) -> np.ndarray:
+def load_segmentation_model() -> tf.keras.Model:
+    model_path = SEG_MODEL_DIR / "best_model.keras"
+    if not model_path.exists():
+        raise RuntimeError(f"[ERROR] Missing trained model: {model_path}")
+
+    model = tf.keras.models.load_model(
+        model_path,
+        custom_objects={
+            "dice_coef": dice_coef,
+            "iou_coef": iou_coef,
+            "bce_dice_loss": bce_dice_loss,
+        },
+    )
+    return model
+
+
+def predict_mask(model: tf.keras.Model, img_arr: np.ndarray, threshold: float = 0.5) -> np.ndarray:
     x = img_arr.astype(np.float32) / 255.0
     x = tf.image.resize(x[..., None], IMAGE_SIZE).numpy()[None, ...]
 
     pred = model.predict(x, verbose=0)[0, :, :, 0]
-    pred = (pred > 0.5).astype(np.uint8)
+    pred = (pred > threshold).astype(np.uint8)
 
     pred = Image.fromarray(pred * 255).resize(
         (img_arr.shape[1], img_arr.shape[0]),
-        resample=Image.NEAREST,
+        resample=Image.Resampling.NEAREST,
     )
 
     return np.array(pred)
@@ -515,53 +630,99 @@ def apply_mask(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return (img * (mask > 0)).astype(np.uint8)
 
 
-def crop_to_mask(img: np.ndarray, mask: np.ndarray, margin: int = 10) -> np.ndarray:
+def crop_to_mask(
+    img: np.ndarray,
+    mask: np.ndarray,
+    margin: int = 10,
+    min_size: int = 32,
+) -> np.ndarray:
     ys, xs = np.where(mask > 0)
 
     if len(xs) == 0 or len(ys) == 0:
         return img
 
-    x1 = max(0, xs.min() - margin)
-    x2 = min(img.shape[1], xs.max() + margin)
-    y1 = max(0, ys.min() - margin)
-    y2 = min(img.shape[0], ys.max() + margin)
+    x1 = max(0, int(xs.min()) - margin)
+    x2 = min(img.shape[1], int(xs.max()) + margin + 1)
+    y1 = max(0, int(ys.min()) - margin)
+    y2 = min(img.shape[0], int(ys.max()) + margin + 1)
 
     crop = img[y1:y2, x1:x2]
+
+    if crop.shape[0] < min_size or crop.shape[1] < min_size:
+        return img
+
     return crop
 
 
-def generate_classifier_variants():
-    model = tf.keras.models.load_model(
-        SEGMENTATION_MODELS_DIR / "lung_unet" / "best_model.keras",
-        custom_objects={
-            "dice_coef": dice_coef,
-            "bce_dice_loss": bce_dice_loss,
-        },
-    )
+def generate_classifier_variants(
+    source_root: str | Path = RAW_DIR,
+    threshold: float = 0.5,
+    crop_margin: int = 10,
+) -> dict[str, Any]:
+    """
+    Generates lung_masks / lung_masked / lung_crop from the classifier dataset.
+    """
+    source_root = Path(source_root)
+    if not source_root.exists():
+        raise RuntimeError(f"[ERROR] Source classifier dataset not found: {source_root}")
+
+    model = load_segmentation_model()
 
     ensure_dir(LUNG_MASK_DIR)
     ensure_dir(LUNG_MASKED_DIR)
     ensure_dir(LUNG_CROP_DIR)
 
-    image_files = list_images(RAW_DIR)
+    image_files = list_images(source_root)
+    if len(image_files) == 0:
+        raise RuntimeError(f"[ERROR] No images found in: {source_root}")
+
+    count = 0
 
     for path in image_files:
-        rel = path.relative_to(RAW_DIR)
+        rel = path.relative_to(source_root)
 
         img = open_gray(path)
-        mask = predict_mask(model, img)
+        mask = predict_mask(model, img, threshold=threshold)
 
         masked = apply_mask(img, mask)
-        crop = crop_to_mask(img, mask)
+        crop = crop_to_mask(img, mask, margin=crop_margin)
 
         save_gray(mask, LUNG_MASK_DIR / rel)
         save_gray(masked, LUNG_MASKED_DIR / rel)
         save_gray(crop, LUNG_CROP_DIR / rel)
 
-    print("[OK] Generated:")
+        count += 1
+
+    summary = {
+        "source_root": str(source_root),
+        "num_images_processed": count,
+        "lung_mask_dir": str(LUNG_MASK_DIR),
+        "lung_masked_dir": str(LUNG_MASKED_DIR),
+        "lung_crop_dir": str(LUNG_CROP_DIR),
+        "threshold": float(threshold),
+        "crop_margin": int(crop_margin),
+    }
+    save_json(summary, SEGMENTATION_DATA_DIR / "classifier_variants_summary.json")
+
+    print("[OK] Generated classifier variants")
     print(" -", LUNG_MASK_DIR)
     print(" -", LUNG_MASKED_DIR)
     print(" -", LUNG_CROP_DIR)
+
+    return summary
+
+
+# backward compatible alias
+def generate_dataset_variants(
+    source_root: str | Path = RAW_DIR,
+    threshold: float = 0.5,
+    crop_margin: int = 10,
+):
+    return generate_classifier_variants(
+        source_root=source_root,
+        threshold=threshold,
+        crop_margin=crop_margin,
+    )
 
 
 # =========================================================
@@ -570,9 +731,43 @@ def generate_classifier_variants():
 
 def run_full_segmentation_pipeline(
     epochs: int = 20,
-):
+    learning_rate: float = 1e-3,
+    batch_size: int = BATCH_SIZE,
+    threshold: float = 0.5,
+    crop_margin: int = 10,
+) -> dict[str, Any]:
     prepare_segmentation_dataset()
-    create_splits()
-    train_segmentation(epochs=epochs)
-    plot_predictions()
-    generate_classifier_variants()
+    split_summary = create_splits()
+    history = train_segmentation(
+        epochs=epochs,
+        learning_rate=learning_rate,
+        batch_size=batch_size,
+    )
+    test_metrics = evaluate_segmentation(batch_size=batch_size)
+
+    try:
+        plot_training_history()
+    except Exception as e:
+        print("[WARN] plot_training_history failed:", e)
+
+    try:
+        plot_predictions()
+    except Exception as e:
+        print("[WARN] plot_predictions failed:", e)
+
+    variant_summary = generate_classifier_variants(
+        source_root=RAW_DIR,
+        threshold=threshold,
+        crop_margin=crop_margin,
+    )
+
+    result = {
+        "split_summary": split_summary,
+        "test_metrics": test_metrics,
+        "variant_summary": variant_summary,
+        "epochs": int(epochs),
+        "learning_rate": float(learning_rate),
+        "batch_size": int(batch_size),
+    }
+    save_json(result, SEG_MODEL_DIR / "pipeline_summary.json")
+    return result
