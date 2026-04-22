@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-import kagglahub
+import kagglehub
 
 from src.config import RAW_DIR, SEGMENTATION_RAW_DIR, DATA_DIR, ensure_dir
 
