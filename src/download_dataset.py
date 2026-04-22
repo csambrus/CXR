@@ -4,8 +4,7 @@ import shutil
 from pathlib import Path
 import kagglehub
 
-from src.config import RAW_DIR, DATA_DIR, SEG_DIR, ensure_dir
-
+from src.config import RAW_DIR, SEGMENTATION_RAW_DIR, ensure_dir
 
 # =========================================================
 # MAIN CLASSIFIER DATASET
@@ -28,8 +27,8 @@ COVID_EXPECTED = [
 # SEGMENTATION DATASETS
 # =========================================================
 
-MONT_DIR = SEG_DIR / "montgomery"
-SHEN_DIR = SEG_DIR / "shenzhen"
+MONT_DIR = SEGMENTATION_RAW_DIR / "montgomery"
+SHEN_DIR = SEGMENTATION_RAW_DIR / "shenzhen"
 
 MONT_SLUG = "nih-chest-xray/montgomery-cxr"
 SHEN_SLUG = "nih-chest-xray/shenzhen-cxr"
