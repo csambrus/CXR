@@ -142,38 +142,49 @@ def find_mask_for_image(img_path: Path, mask_dir: Path) -> Path | None:
 # =========================================================
 # Dataset preparation
 # =========================================================
-
 def prepare_segmentation_dataset() -> int:
     """
-    Converts the raw CRD dataset into a clean merged/images + merged/masks structure.
+    Prepares the segmentation dataset from the flattened raw structure:
+
+        SEGMENTATION_RAW_DIR / images
+        SEGMENTATION_RAW_DIR / masks
+
+    and writes normalized PNG image-mask pairs into:
+
+        MERGED_DIR / images
+        MERGED_DIR / masks
     """
-    ensure_dir(MERGED_IMAGES_DIR)
-    ensure_dir(MERGED_MASKS_DIR)
+    raw_images_dir = SEGMENTATION_RAW_DIR / "images"
+    raw_masks_dir = SEGMENTATION_RAW_DIR / "masks"
 
-    if not CRD_DIR.exists():
+    merged_images_dir = MERGED_DIR / "images"
+    merged_masks_dir = MERGED_DIR / "masks"
+
+    ensure_dir(merged_images_dir)
+    ensure_dir(merged_masks_dir)
+
+    if not raw_images_dir.exists():
         raise RuntimeError(
-            f"[ERROR] CRD dataset folder not found: {CRD_DIR}\n"
-            "Download it first into DATA_DIR / segmentation_raw / crd_lung_masks."
+            f"[ERROR] Segmentation images folder not found: {raw_images_dir}\n"
+            f"Download it first into {SEGMENTATION_RAW_DIR}."
         )
 
-    found = find_crd_structure(CRD_DIR)
-    if found is None:
+    if not raw_masks_dir.exists():
         raise RuntimeError(
-            "[ERROR] Could not detect CRD dataset structure.\n"
-            f"Inspect this folder and extend find_crd_structure(): {CRD_DIR}"
+            f"[ERROR] Segmentation masks folder not found: {raw_masks_dir}\n"
+            f"Download it first into {SEGMENTATION_RAW_DIR}."
         )
 
-    img_dir, mask_dir = found
-    image_files = list_images(img_dir)
+    image_files = list_images(raw_images_dir)
 
     if len(image_files) == 0:
-        raise RuntimeError(f"[ERROR] No images found in: {img_dir}")
+        raise RuntimeError(f"[ERROR] No images found in: {raw_images_dir}")
 
     count = 0
     missing_masks = 0
 
     for img_path in image_files:
-        mask_path = find_mask_for_image(img_path, mask_dir)
+        mask_path = find_mask_for_image(img_path, raw_masks_dir)
         if mask_path is None:
             missing_masks += 1
             continue
@@ -183,17 +194,17 @@ def prepare_segmentation_dataset() -> int:
 
         mask = (mask > 0).astype(np.uint8) * 255
 
-        out_img = MERGED_IMAGES_DIR / f"{img_path.stem}.png"
-        out_mask = MERGED_MASKS_DIR / f"{img_path.stem}.png"
+        out_img = merged_images_dir / f"{img_path.stem}.png"
+        out_mask = merged_masks_dir / f"{img_path.stem}.png"
 
         save_gray(img, out_img)
         save_gray(mask, out_mask)
         count += 1
 
     summary = {
-        "source_root": str(CRD_DIR),
-        "image_dir": str(img_dir),
-        "mask_dir": str(mask_dir),
+        "source_root": str(SEGMENTATION_RAW_DIR),
+        "image_dir": str(raw_images_dir),
+        "mask_dir": str(raw_masks_dir),
         "num_images_found": len(image_files),
         "num_pairs_saved": count,
         "num_missing_masks": missing_masks,
@@ -205,8 +216,6 @@ def prepare_segmentation_dataset() -> int:
         print(f"[WARN] Missing masks for {missing_masks} images")
 
     return count
-
-
 # =========================================================
 # Splits
 # =========================================================
