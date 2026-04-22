@@ -156,20 +156,14 @@ def move_segmentation_dataset(
 
     print("[INFO] Moving segmentation dataset into SEGMENTATION_RAW_DIR...")
 
-    if move_only_combined:
-        folders_to_move = [
-            "CXR_Combined",
-            "CXR_Combined_masks",
-        ]
-    else:
-        folders_to_move = [
-            "CXR_Combined",
-            "CXR_Combined_masks",
-            "CXR_RadioLucent",
-            "CXR_RadioLucent_masks",
-            "CXR_RadioOpaque",
-            "CXR_RadioOpaque_masks",
-        ]
+    folders_to_move = [
+        "CXR_Combined",
+        "CXR_Combined_masks",
+        #"CXR_RadioLucent",
+        #"CXR_RadioLucent_masks",
+        #"CXR_RadioOpaque",
+        #"CXR_RadioOpaque_masks",
+    ]
 
     moved_any = False
 
@@ -241,10 +235,7 @@ def download_classifier_dataset(force: bool = False) -> None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def download_segmentation_dataset(
-    force: bool = False,
-    move_only_combined: bool = True,
-) -> None:
+def download_segmentation_dataset(force: bool = False) -> None:
     ensure_dir(SEGMENTATION_RAW_DIR)
 
     if SEG_READY_MARKER.exists() and not force:
@@ -258,26 +249,16 @@ def download_segmentation_dataset(
     tmp_dir = None
     try:
         tmp_dir = _download_to_temp(CRD_SEG_SLUG)
-        move_segmentation_dataset(
-            tmp_root=tmp_dir,
-            move_only_combined=move_only_combined,
-        )
+        move_segmentation_dataset(tmp_root=tmp_dir)
         print("[OK] Segmentation dataset ready.")
     finally:
         if tmp_dir is not None and tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def download_all_datasets(
-    force_classifier: bool = False,
-    force_segmentation: bool = False,
-    move_only_combined: bool = True,
-) -> None:
-    download_classifier_dataset(force=force_classifier)
-    download_segmentation_dataset(
-        force=force_segmentation,
-        move_only_combined=move_only_combined,
-    )
+def download_all_datasets() -> None:
+    download_classifier_dataset()
+    download_segmentation_dataset()
 
 
 # =========================================================
@@ -285,8 +266,4 @@ def download_all_datasets(
 # =========================================================
 
 if __name__ == "__main__":
-    download_all_datasets(
-        force_classifier=False,
-        force_segmentation=False,
-        move_only_combined=True,
-    )
+    download_all_datasets()
