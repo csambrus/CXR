@@ -186,7 +186,9 @@ def save_json(data: dict[str, Any], path: str | Path) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
+
 def set_seed(seed: int = SEED) -> None:
     random.seed(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
+
