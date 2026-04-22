@@ -122,21 +122,24 @@ def move_classifier_dataset(tmp_root: Path) -> None:
 
 def move_segmentation_dataset(
     tmp_root: Path,
-    move_only_combined: bool = True,
 ) -> None:
     """
-    Kaggle dataset tipikusan így bontódik ki:
+    Várt forrásstruktúra például:
 
     tmp_root/
         crd_lung_masks/
             CXR_Combined/
-            CXR_Combined_masks/
+                images/
+                masks/
             CXR_RadioLucent/
             CXR_RadioLucent_masks/
             CXR_RadioOpaque/
             CXR_RadioOpaque_masks/
 
-    vagy esetenként közvetlenül a tmp_root alá.
+    A cél:
+        SEGMENTATION_RAW_DIR/
+            images/
+            masks/
     """
     possible_roots = [
         tmp_root / "crd_lung_masks",
@@ -154,41 +157,42 @@ def move_segmentation_dataset(
             f"[ERROR] Could not locate extracted segmentation dataset in: {tmp_root}"
         )
 
+    print(f"[INFO] Segmentation source root: {src_root}")
     print("[INFO] Moving segmentation dataset into SEGMENTATION_RAW_DIR...")
 
-    folders_to_move = [
-        "CXR_Combined",
-        "CXR_Combined_masks",
-        #"CXR_RadioLucent",
-        #"CXR_RadioLucent_masks",
-        #"CXR_RadioOpaque",
-        #"CXR_RadioOpaque_masks",
-    ]
+    combined_dir = src_root / "CXR_Combined"
+    src_images = combined_dir / "images"
+    src_masks = combined_dir / "masks"
 
-    moved_any = False
+    if not combined_dir.exists():
+        raise RuntimeError(f"[ERROR] Missing folder: {combined_dir}")
+    if not src_images.exists():
+        raise RuntimeError(f"[ERROR] Missing folder: {src_images}")
+    if not src_masks.exists():
+        raise RuntimeError(f"[ERROR] Missing folder: {src_masks}")
 
-    for folder_name in folders_to_move:
-        src = src_root / folder_name
-        dst = SEGMENTATION_RAW_DIR / folder_name
+    dst_images = SEGMENTATION_RAW_DIR / "images"
+    dst_masks = SEGMENTATION_RAW_DIR / "masks"
 
-        if not src.exists():
-            print(f"[WARN] Missing: {src}")
-            continue
+    if dst_images.exists():
+        print(f"[SKIP] Already exists: {dst_images}")
+    else:
+        shutil.move(str(src_images), str(dst_images))
+        print(f"[OK] Moved: {src_images} -> {dst_images}")
 
-        if dst.exists():
-            print(f"[SKIP] Already exists: {dst}")
-            continue
+    if dst_masks.exists():
+        print(f"[SKIP] Already exists: {dst_masks}")
+    else:
+        shutil.move(str(src_masks), str(dst_masks))
+        print(f"[OK] Moved: {src_masks} -> {dst_masks}")
 
-        shutil.move(str(src), str(dst))
-        print(f"[OK] Moved: {folder_name}")
-        moved_any = True
-
-    if not moved_any:
-        print("[WARN] No new segmentation folders were moved.")
+    if not dst_images.exists():
+        raise RuntimeError(f"[ERROR] Target images dir missing: {dst_images}")
+    if not dst_masks.exists():
+        raise RuntimeError(f"[ERROR] Target masks dir missing: {dst_masks}")
 
     touch(SEG_READY_MARKER)
-
-
+    print("[OK] Segmentation dataset structure verified.")
 # =========================================================
 # Letöltés
 # =========================================================
