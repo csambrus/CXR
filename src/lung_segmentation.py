@@ -112,7 +112,7 @@ def prepare_segmentation_dataset() -> int:
     missing_masks = 0
 
     for img_path in image_files:
-        mask_path = raw_masks_dir / img_path.basename()
+        mask_path = raw_masks_dir / img_path.name
         if mask_path is None:
             missing_masks += 1
             continue
