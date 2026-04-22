@@ -14,9 +14,8 @@ from PIL import Image
 import tensorflow as tf
 
 from src.config import (
-    DATA_DIR,
     RAW_DIR,
-    SEGMENTATION_DIR,
+    SEGMENTATION_RAW_DIR,
     SEGMENTATION_DATA_DIR,
     SEGMENTATION_MODELS_DIR,
     LUNG_MASK_DIR,
@@ -36,16 +35,14 @@ AUTOTUNE = tf.data.AUTOTUNE
 # Paths
 # =========================================================
 
-SEG_RAW_DIR = DATA_DIR / "segmentation_raw"
+MONT_DIR = SEGMENTATION_RAW_DIR / "montgomery"
+SHEN_DIR = SEGMENTATION_RAW_DIR / "shenzhen"
 
-MONT_DIR = SEG_RAW_DIR / "montgomery"
-SHEN_DIR = SEG_RAW_DIR / "shenzhen"
-
-MERGED_DIR = SEGMENTATION_DATA_DIR / "merged"
+MERGED_DIR = SEGMENTATION_RAW_DIR / "merged"
 MERGED_IMAGES_DIR = MERGED_DIR / "images"
 MERGED_MASKS_DIR = MERGED_DIR / "masks"
 
-SPLIT_DIR = SEGMENTATION_DATA_DIR / "splits"
+SEGMENT_SPLIT_DIR = SEGMENTATION_DATA_DIR / "splits"
 
 
 # =========================================================
@@ -280,16 +277,16 @@ def create_splits(
     val_ids = stems[n_test:n_test + n_val]
     train_ids = stems[n_test + n_val:]
 
-    ensure_dir(SPLIT_DIR)
+    ensure_dir(SEGMENT_SPLIT_DIR)
 
     for name, ids in {
         "train": train_ids,
         "val": val_ids,
         "test": test_ids,
     }.items():
-        pd.DataFrame({"id": ids}).to_csv(SPLIT_DIR / f"{name}.csv", index=False)
+        pd.DataFrame({"id": ids}).to_csv(SEGMENT_SPLIT_DIR / f"{name}.csv", index=False)
 
-    print("[OK] Splits saved:", SPLIT_DIR)
+    print("[OK] Splits saved:", SEGMENT_SPLIT_DIR)
 
     return {
         "train": len(train_ids),
@@ -317,7 +314,7 @@ def load_pair(img_path, mask_path):
 
 
 def build_dataset(split_name: str):
-    df = pd.read_csv(SPLIT_DIR / f"{split_name}.csv")
+    df = pd.read_csv(SEGMENT_SPLIT_DIR / f"{split_name}.csv")
 
     img_paths = [str(MERGED_IMAGES_DIR / f"{x}.png") for x in df["id"]]
     mask_paths = [str(MERGED_MASKS_DIR / f"{x}.png") for x in df["id"]]
