@@ -128,11 +128,12 @@ def download_shenzhen():
 # =========================================================
 
 def download_dataset(
-    include_segmentation: bool = True,
+    main: bool = True,
+    segmentation: bool = False,
 ):
-    download_covid()
-
-    if include_segmentation:
+    if main:
+        download_covid()
+    if segmentation:
         download_montgomery()
         download_shenzhen()
 
