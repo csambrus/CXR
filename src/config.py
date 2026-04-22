@@ -48,13 +48,14 @@ REPORTS_DIR = OUTPUT_DIR / "reports"
 LOGS_DIR = OUTPUT_DIR / "logs"
 
 # segmentation related dirs
-SEGMENTATION_DIR = OUTPUT_DIR / "segmentation"
-SEGMENTATION_DATA_DIR = SEGMENTATION_DIR / "data"
-SEGMENTATION_MODELS_DIR = SEGMENTATION_DIR / "models"
+#SEGMENTATION_DATA_DIR = DATA_DIR / "segmentation"
+SEGMENTATION_RAW_DIR    = DATA_DIR    / "segment_raw"
+SEGMENTATION_MODELS_DIR = DATA_DIR / "segment_models"
+SEGMENTATION_OUTPUT_DIR = OUTPUT_DIR  / "segmentation"
 
-LUNG_MASK_DIR = SEGMENTATION_DATA_DIR / "lung_masks"
+LUNG_MASK_DIR   = SEGMENTATION_DATA_DIR / "lung_masks"
 LUNG_MASKED_DIR = SEGMENTATION_DATA_DIR / "lung_masked"
-LUNG_CROP_DIR = SEGMENTATION_DATA_DIR / "lung_crop"
+LUNG_CROP_DIR   = SEGMENTATION_DATA_DIR / "lung_crop"
 
 # -------------------------------------------------
 # Info
