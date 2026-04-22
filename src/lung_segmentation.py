@@ -72,74 +72,6 @@ def save_gray(arr: np.ndarray, path: str | Path) -> None:
 
 
 # =========================================================
-# CRD dataset detection / pairing
-# =========================================================
-
-def find_crd_structure(root: Path) -> tuple[Path, Path] | None:
-    """
-    Tries to find the image and mask folders in the CRD dataset.
-    Add more candidates here if the downloaded folder structure differs.
-    """
-    image_candidates = [
-        root / "images",
-        root / "Images",
-        root / "image",
-        root / "Image",
-        root / "CXR",
-        root / "cxr",
-        root / "train" / "images",
-        root / "data" / "images",
-        root / "CRD",
-    ]
-
-    mask_candidates = [
-        root / "masks",
-        root / "Masks",
-        root / "mask",
-        root / "Mask",
-        root / "lung_masks",
-        root / "LungMasks",
-        root / "lung_mask",
-        root / "train" / "masks",
-        root / "data" / "masks",
-        root / "segmentation_masks",
-    ]
-
-    img_dir = next((p for p in image_candidates if p.exists()), None)
-    mask_dir = next((p for p in mask_candidates if p.exists()), None)
-
-    if img_dir is None or mask_dir is None:
-        return None
-
-    return img_dir, mask_dir
-
-
-def find_mask_for_image(img_path: Path, mask_dir: Path) -> Path | None:
-    stem = img_path.stem
-
-    candidates = [
-        mask_dir / f"{stem}.png",
-        mask_dir / f"{stem}.jpg",
-        mask_dir / f"{stem}.jpeg",
-        mask_dir / f"{stem}.bmp",
-        mask_dir / f"{stem}.tif",
-        mask_dir / f"{stem}.tiff",
-        mask_dir / f"{stem}_mask.png",
-        mask_dir / f"{stem}_mask.jpg",
-        mask_dir / f"{stem}_mask.jpeg",
-        mask_dir / f"{stem}_mask.bmp",
-        mask_dir / f"{stem}_mask.tif",
-        mask_dir / f"{stem}_mask.tiff",
-    ]
-
-    for p in candidates:
-        if p.exists():
-            return p
-
-    return None
-
-
-# =========================================================
 # Dataset preparation
 # =========================================================
 def prepare_segmentation_dataset() -> int:
@@ -157,11 +89,8 @@ def prepare_segmentation_dataset() -> int:
     raw_images_dir = SEGMENTATION_RAW_DIR / "images"
     raw_masks_dir = SEGMENTATION_RAW_DIR / "masks"
 
-    merged_images_dir = MERGED_DIR / "images"
-    merged_masks_dir = MERGED_DIR / "masks"
-
-    ensure_dir(merged_images_dir)
-    ensure_dir(merged_masks_dir)
+    merged_images_dir = SEGMENTATION_DATA_DIR / "images"
+    merged_masks_dir = SEGMENTATION_DATA_DIR / "masks"
 
     if not raw_images_dir.exists():
         raise RuntimeError(
@@ -184,7 +113,7 @@ def prepare_segmentation_dataset() -> int:
     missing_masks = 0
 
     for img_path in image_files:
-        mask_path = find_mask_for_image(img_path, raw_masks_dir)
+        mask_path = raw_masks_dir / img_path.basename()
         if mask_path is None:
             missing_masks += 1
             continue
