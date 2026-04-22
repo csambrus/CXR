@@ -48,7 +48,8 @@ REPORTS_DIR = OUTPUT_DIR / "reports"
 LOGS_DIR = OUTPUT_DIR / "logs"
 
 # segmentation related dirs
-SEGMENTATION_DATA_DIR = DATA_DIR / "segment_raw"
+SEGMENTATION_RAW_DIR = DATA_DIR / "segment_raw"
+SEGMENTATION_DATA_DIR = INTERIM_DIR / "segmentation"
 SEGMENTATION_MODELS_DIR = INTERIM_DIR / "segment_models"
 SEGMENTATION_OUTPUT_DIR = OUTPUT_DIR  / "segmentation"
 
