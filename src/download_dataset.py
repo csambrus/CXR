@@ -229,8 +229,8 @@ def print_dataset_summary():
 # =========================================================
 
 def download_dataset(
-    include_classifier: bool = True,
-    include_segmentation: bool = True,
+    classifier: bool = True,
+    segmentation: bool = True,
     force: bool = False,
 ):
     """
@@ -245,10 +245,10 @@ def download_dataset(
             include_segmentation=True,
         )
     """
-    if include_classifier:
+    if classifier:
         download_classifier_dataset(force=force)
 
-    if include_segmentation:
+    if segmentation:
         download_segmentation_dataset(force=force)
 
     print_dataset_summary()
@@ -260,7 +260,7 @@ def download_dataset(
 
 if __name__ == "__main__":
     download_dataset(
-        include_classifier=True,
-        include_segmentation=True,
+        classifier=True,
+        segmentation=True,
         force=False,
     )
