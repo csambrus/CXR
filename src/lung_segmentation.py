@@ -27,8 +27,7 @@ from src.config import (
     SEED,
     PLOT_DPI,
     ensure_dir,
-    save_json,
-    set_seed
+    save_json
 )
 
 AUTOTUNE = tf.data.AUTOTUNE
@@ -341,7 +340,7 @@ def train_segmentation(
     learning_rate: float = 1e-3,
     batch_size: int = BATCH_SIZE,
 ) -> dict[str, list[float]]:
-    set_seed(SEED)
+    #set_seed(SEED)
 
     train_ds = build_dataset("train", batch_size=batch_size)
     val_ds = build_dataset("val", batch_size=batch_size)
