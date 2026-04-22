@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-import kagglehub
+import kagglahub
 
-from src.config import RAW_DIR, DATA_DIR, ensure_dir
+from src.config import RAW_DIR, SEGMENTATION_RAW_DIR, DATA_DIR, ensure_dir
 
 
 # =========================================================
@@ -35,10 +35,8 @@ COVID_EXPECTED_FOLDERS = [
 ]
 
 # Segmentation dataset
-SEG_RAW_DIR = DATA_DIR / "segmentation_raw"
-CRD_DIR = SEG_RAW_DIR / "crd_lung_masks"
+CRD_DIR = SEGMENTATION_RAW_DIR / "crd_lung_masks"
 CRD_READY_MARKER = CRD_DIR / ".dataset_ready"
-
 
 # =========================================================
 # HELPERS
