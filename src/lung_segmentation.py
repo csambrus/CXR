@@ -17,6 +17,7 @@ from src.config import (
     RAW_DIR,
     SEGMENTATION_RAW_DIR,
     SEGMENTATION_DATA_DIR,
+    SEGMENTATION_SPLITS_DIR,
     SEGMENTATION_MODELS_DIR,
     LUNG_MASK_DIR,
     LUNG_MASKED_DIR,
@@ -41,9 +42,6 @@ SHEN_DIR = SEGMENTATION_RAW_DIR / "shenzhen"
 MERGED_DIR = SEGMENTATION_RAW_DIR / "merged"
 MERGED_IMAGES_DIR = MERGED_DIR / "images"
 MERGED_MASKS_DIR = MERGED_DIR / "masks"
-
-SEGMENT_SPLIT_DIR = SEGMENTATION_DATA_DIR / "splits"
-
 
 # =========================================================
 # Utils
@@ -277,16 +275,16 @@ def create_splits(
     val_ids = stems[n_test:n_test + n_val]
     train_ids = stems[n_test + n_val:]
 
-    ensure_dir(SEGMENT_SPLIT_DIR)
+    ensure_dir(SEGMENTATION_SPLITS_DIR)
 
     for name, ids in {
         "train": train_ids,
         "val": val_ids,
         "test": test_ids,
     }.items():
-        pd.DataFrame({"id": ids}).to_csv(SEGMENT_SPLIT_DIR / f"{name}.csv", index=False)
+        pd.DataFrame({"id": ids}).to_csv(SEGMENTATION_SPLITS_DIR / f"{name}.csv", index=False)
 
-    print("[OK] Splits saved:", SEGMENT_SPLIT_DIR)
+    print("[OK] Splits saved:", SEGMENTATION_SPLITS_DIR)
 
     return {
         "train": len(train_ids),
@@ -314,7 +312,7 @@ def load_pair(img_path, mask_path):
 
 
 def build_dataset(split_name: str):
-    df = pd.read_csv(SEGMENT_SPLIT_DIR / f"{split_name}.csv")
+    df = pd.read_csv(SEGMENTATION_SPLITS_DIR / f"{split_name}.csv")
 
     img_paths = [str(MERGED_IMAGES_DIR / f"{x}.png") for x in df["id"]]
     mask_paths = [str(MERGED_MASKS_DIR / f"{x}.png") for x in df["id"]]
