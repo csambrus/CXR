@@ -123,7 +123,7 @@ CACHE_DATASET = True
 PREFETCH_DATASET = True
 
 # =========================================================
-# Preprocessing / augmentáció (első verzió)
+# Preprocessing / augmentáció
 # =========================================================
 USE_MODEL_PREPROCESSING = True
 NORMALIZE_TO_0_1 = True
@@ -146,7 +146,7 @@ BACKBONE_NAME = "DenseNet121"
 USE_IMAGENET_WEIGHTS = True
 FREEZE_BACKBONE = True
 
-
+PLOT_DPI = 150
 # =========================================================
 # Utilities
 # =========================================================
