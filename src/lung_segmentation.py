@@ -15,7 +15,9 @@ import tensorflow as tf
 from src.config import (
     DATA_DIR,
     RAW_DIR,
+    SEGMENTATION_RAW_DIR,
     SEGMENTATION_DATA_DIR,
+    SEGMENTATION_SPLITS_DIR,
     SEGMENTATION_MODELS_DIR,
     LUNG_MASK_DIR,
     LUNG_MASKED_DIR,
@@ -25,42 +27,26 @@ from src.config import (
     SEED,
     PLOT_DPI,
     ensure_dir,
+    save_json,
+    set_seed
 )
 
 AUTOTUNE = tf.data.AUTOTUNE
-
 
 # =========================================================
 # Paths
 # =========================================================
 
-SEG_RAW_DIR = DATA_DIR / "segmentation_raw"
-CRD_DIR = SEG_RAW_DIR / "crd_lung_masks"
+CRD_DIR = SEGMENTATION_RAW_DIR / "crd_lung_masks"
 
-MERGED_DIR = SEGMENTATION_DATA_DIR / "merged"
-MERGED_IMAGES_DIR = MERGED_DIR / "images"
-MERGED_MASKS_DIR = MERGED_DIR / "masks"
+MERGED_IMAGES_DIR = SEGMENTATION_DATA_DIR / "merged_images"
+MERGED_MASKS_DIR = SEGMENTATION_DATA_DIR / "merged_masks"
 
-SPLIT_DIR = SEGMENTATION_DATA_DIR / "splits"
 SEG_MODEL_DIR = SEGMENTATION_MODELS_DIR / "lung_unet"
-
 
 # =========================================================
 # General utils
 # =========================================================
-
-def set_seed(seed: int = SEED) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    tf.random.set_seed(seed)
-
-
-def save_json(data: dict, path: str | Path) -> None:
-    path = Path(path)
-    ensure_dir(path.parent)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
 
 def list_images(
     folder: str | Path,
@@ -251,11 +237,11 @@ def create_splits(
     val_ids = ids[n_test:n_test + n_val]
     train_ids = ids[n_test + n_val:]
 
-    ensure_dir(SPLIT_DIR)
+    ensure_dir(SEGMENTATION_SPLITS_DIR)
 
-    pd.DataFrame({"id": train_ids}).to_csv(SPLIT_DIR / "train.csv", index=False)
-    pd.DataFrame({"id": val_ids}).to_csv(SPLIT_DIR / "val.csv", index=False)
-    pd.DataFrame({"id": test_ids}).to_csv(SPLIT_DIR / "test.csv", index=False)
+    pd.DataFrame({"id": train_ids}).to_csv(SEGMENTATION_SPLITS_DIR / "train.csv", index=False)
+    pd.DataFrame({"id": val_ids}).to_csv(SEGMENTATION_SPLITS_DIR / "val.csv", index=False)
+    pd.DataFrame({"id": test_ids}).to_csv(SEGMENTATION_SPLITS_DIR / "test.csv", index=False)
 
     summary = {
         "train": len(train_ids),
@@ -263,7 +249,7 @@ def create_splits(
         "test": len(test_ids),
         "total": n,
     }
-    save_json(summary, SPLIT_DIR / "split_summary.json")
+    save_json(summary, SEGMENTATION_SPLITS_DIR / "split_summary.json")
 
     print("[OK] Segmentation splits created:", summary)
     return summary
@@ -302,7 +288,7 @@ def augment_pair(image: tf.Tensor, mask: tf.Tensor):
 
 
 def build_dataset(split_name: str, batch_size: int = BATCH_SIZE) -> tf.data.Dataset:
-    split_csv = SPLIT_DIR / f"{split_name}.csv"
+    split_csv = SEGMENTATION_SPLITS_DIR / f"{split_name}.csv"
     if not split_csv.exists():
         raise RuntimeError(f"[ERROR] Missing split file: {split_csv}")
 
