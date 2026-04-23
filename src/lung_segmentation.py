@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Sequence, Any
 import json
 import time
-import random
 
 import numpy as np
 import pandas as pd
@@ -31,6 +30,8 @@ from src.config import (
     save_json,
 )
 
+from src.runtime import set_seed
+
 AUTOTUNE = tf.data.AUTOTUNE
 
 
@@ -49,12 +50,6 @@ SEG_MODEL_DIR = SEGMENTATION_MODELS_DIR / "lung_unet"
 # =========================================================
 # General utils
 # =========================================================
-
-def set_seed(seed: int = SEED) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    tf.random.set_seed(seed)
-
 
 def list_images(
     folder: str | Path,
