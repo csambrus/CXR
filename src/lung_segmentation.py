@@ -977,7 +977,6 @@ def run_full_segmentation_pipeline(
     return result
 
 def verify_png_files(paths, label: str) -> None:
-    from pathlib import Path
 
     bad = 0
     for p in paths:
