@@ -38,9 +38,6 @@ AUTOTUNE = tf.data.AUTOTUNE
 
 CRD_DIR = SEGMENTATION_RAW_DIR / "crd_lung_masks"
 
-MERGED_IMAGES_DIR = SEGMENTATION_DATA_DIR / "merged_images"
-MERGED_MASKS_DIR = SEGMENTATION_DATA_DIR / "merged_masks"
-
 SEG_MODEL_DIR = SEGMENTATION_MODELS_DIR / "lung_unet"
 
 # =========================================================
@@ -66,7 +63,6 @@ def open_gray(path: str | Path) -> np.ndarray:
 
 def save_gray(arr: np.ndarray, path: str | Path) -> None:
     path = Path(path)
-    ensure_dir(path.parent)
     Image.fromarray(arr.astype(np.uint8)).save(path)
 
 
@@ -88,6 +84,10 @@ def prepare_segmentation_dataset() -> int:
     merged_images_dir = SEGMENTATION_DATA_DIR / "images"
     merged_masks_dir = SEGMENTATION_DATA_DIR / "masks"
 
+    ensure_dir(merged_images_dir)
+    ensure_dir(merged_masks_dir)
+
+    
     if not raw_images_dir.exists():
         raise RuntimeError(
             f"[ERROR] Segmentation images folder not found: {raw_images_dir}\n"
@@ -107,16 +107,22 @@ def prepare_segmentation_dataset() -> int:
 
     count = 0
     missing_masks = 0
-
+    skipped: list[str] = []
+    
     for img_path in image_files:
         mask_path = raw_masks_dir / img_path.name
-        if mask_path is None:
+        if not mask_path.exists():
             missing_masks += 1
+            skipped.append(img_path.name)
             continue
 
         img = open_gray(img_path)
         mask = open_gray(mask_path)
 
+        if img.shape[:2] != mask.shape[:2]:
+            skipped.append(img_path.name)
+            continue
+        
         mask = (mask > 0).astype(np.uint8) * 255
 
         out_img = merged_images_dir / f"{img_path.stem}.png"
@@ -133,12 +139,16 @@ def prepare_segmentation_dataset() -> int:
         "num_images_found": len(image_files),
         "num_pairs_saved": count,
         "num_missing_masks": missing_masks,
+        "num_skipped": len(skipped),
+        "skipped_examples": skipped[:20],
     }
     save_json(summary, SEGMENTATION_DATA_DIR / "prepare_summary.json")
 
     print(f"[OK] Prepared segmentation dataset: {count} pairs")
     if missing_masks:
         print(f"[WARN] Missing masks for {missing_masks} images")
+    if skipped and len(skipped) != missing_masks:
+        print(f"[WARN] Skipped {len(skipped) - missing_masks} pairs due to validation issues")
 
     return count
 # =========================================================
