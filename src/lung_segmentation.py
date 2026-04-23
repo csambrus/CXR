@@ -975,3 +975,19 @@ def run_full_segmentation_pipeline(
     }
     save_json(result, SEG_MODEL_DIR / "pipeline_summary.json")
     return result
+
+def verify_png_files(paths, label: str) -> None:
+    from pathlib import Path
+
+    bad = 0
+    for p in paths:
+        p = Path(p)
+        if not p.exists():
+            print(f"[ERROR] Missing {label}: {p}")
+            bad += 1
+        elif p.stat().st_size == 0:
+            print(f"[ERROR] Empty {label}: {p}")
+            bad += 1
+
+    if bad > 0:
+        raise RuntimeError(f"[ERROR] Found {bad} invalid {label} files.")
