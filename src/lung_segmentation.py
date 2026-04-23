@@ -3,14 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence, Any
 import json
-import random
 import time
+import random
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from PIL import Image
 from tqdm.auto import tqdm
-
 import tensorflow as tf
 
 from src.config import (
@@ -28,10 +28,11 @@ from src.config import (
     SEED,
     PLOT_DPI,
     ensure_dir,
-    save_json
+    save_json,
 )
 
 AUTOTUNE = tf.data.AUTOTUNE
+
 
 # =========================================================
 # Paths
@@ -39,11 +40,21 @@ AUTOTUNE = tf.data.AUTOTUNE
 
 CRD_DIR = SEGMENTATION_RAW_DIR / "crd_lung_masks"
 
+MERGED_IMAGES_DIR = SEGMENTATION_DATA_DIR / "images"
+MERGED_MASKS_DIR = SEGMENTATION_DATA_DIR / "masks"
+
 SEG_MODEL_DIR = SEGMENTATION_MODELS_DIR / "lung_unet"
+
 
 # =========================================================
 # General utils
 # =========================================================
+
+def set_seed(seed: int = SEED) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+
 
 def list_images(
     folder: str | Path,
@@ -68,6 +79,10 @@ def save_gray(arr: np.ndarray, path: str | Path) -> None:
     Image.fromarray(arr.astype(np.uint8)).save(path)
 
 
+# =========================================================
+# Dataset preparation
+# =========================================================
+
 def prepare_segmentation_dataset(
     overwrite: bool = False,
     show_every: int = 250,
@@ -86,11 +101,8 @@ def prepare_segmentation_dataset(
     raw_images_dir = SEGMENTATION_RAW_DIR / "images"
     raw_masks_dir = SEGMENTATION_RAW_DIR / "masks"
 
-    merged_images_dir = SEGMENTATION_DATA_DIR / "images"
-    merged_masks_dir = SEGMENTATION_DATA_DIR / "masks"
-
-    ensure_dir(merged_images_dir)
-    ensure_dir(merged_masks_dir)
+    ensure_dir(MERGED_IMAGES_DIR)
+    ensure_dir(MERGED_MASKS_DIR)
 
     if not raw_images_dir.exists():
         raise RuntimeError(
@@ -114,21 +126,26 @@ def prepare_segmentation_dataset(
     print("=" * 72)
     print("raw_images_dir   :", raw_images_dir)
     print("raw_masks_dir    :", raw_masks_dir)
-    print("merged_images_dir:", merged_images_dir)
-    print("merged_masks_dir :", merged_masks_dir)
+    print("merged_images_dir:", MERGED_IMAGES_DIR)
+    print("merged_masks_dir :", MERGED_MASKS_DIR)
     print("num_images_found :", len(image_files))
     print("overwrite        :", overwrite)
+    print("show_every       :", show_every)
     print("=" * 72)
 
     count = 0
     missing_masks = 0
     skipped_validation = 0
     skipped_existing = 0
+    read_errors = 0
     skipped_examples: list[str] = []
 
     start_time = time.time()
 
-    for idx, img_path in enumerate(tqdm(image_files, desc="Preparing pairs", unit="img"), start=1):
+    for idx, img_path in enumerate(
+        tqdm(image_files, desc="Preparing pairs", unit="img"),
+        start=1,
+    ):
         mask_path = raw_masks_dir / img_path.name
         if not mask_path.exists():
             missing_masks += 1
@@ -136,8 +153,8 @@ def prepare_segmentation_dataset(
                 skipped_examples.append(f"missing_mask: {img_path.name}")
             continue
 
-        out_img = merged_images_dir / f"{img_path.stem}.png"
-        out_mask = merged_masks_dir / f"{img_path.stem}.png"
+        out_img = MERGED_IMAGES_DIR / f"{img_path.stem}.png"
+        out_mask = MERGED_MASKS_DIR / f"{img_path.stem}.png"
 
         if not overwrite and out_img.exists() and out_mask.exists():
             skipped_existing += 1
@@ -147,7 +164,7 @@ def prepare_segmentation_dataset(
             img = open_gray(img_path)
             mask = open_gray(mask_path)
         except Exception as e:
-            skipped_validation += 1
+            read_errors += 1
             if len(skipped_examples) < 20:
                 skipped_examples.append(f"read_error: {img_path.name} ({e})")
             continue
@@ -174,6 +191,7 @@ def prepare_segmentation_dataset(
                 f"saved={count} | missing_masks={missing_masks} | "
                 f"skipped_validation={skipped_validation} | "
                 f"skipped_existing={skipped_existing} | "
+                f"read_errors={read_errors} | "
                 f"{rate:.1f} img/s"
             )
 
@@ -183,13 +201,14 @@ def prepare_segmentation_dataset(
         "source_root": str(SEGMENTATION_RAW_DIR),
         "image_dir": str(raw_images_dir),
         "mask_dir": str(raw_masks_dir),
-        "merged_images_dir": str(merged_images_dir),
-        "merged_masks_dir": str(merged_masks_dir),
+        "merged_images_dir": str(MERGED_IMAGES_DIR),
+        "merged_masks_dir": str(MERGED_MASKS_DIR),
         "num_images_found": len(image_files),
         "num_pairs_saved": count,
         "num_missing_masks": missing_masks,
         "num_skipped_validation": skipped_validation,
         "num_skipped_existing": skipped_existing,
+        "num_read_errors": read_errors,
         "elapsed_seconds": elapsed,
         "images_per_second": (len(image_files) / elapsed) if elapsed > 0 else None,
         "skipped_examples": skipped_examples,
@@ -205,6 +224,7 @@ def prepare_segmentation_dataset(
     print("missing masks      :", missing_masks)
     print("skipped validation :", skipped_validation)
     print("skipped existing   :", skipped_existing)
+    print("read errors        :", read_errors)
     print(f"elapsed            : {elapsed:.2f} sec")
     if elapsed > 0:
         print(f"speed              : {len(image_files) / elapsed:.2f} img/s")
@@ -221,43 +241,176 @@ def create_splits(
     val_ratio: float = 0.15,
     test_ratio: float = 0.15,
     seed: int = SEED,
-) -> dict[str, int]:
+    overwrite: bool = False,
+    require_masks: bool = True,
+    show_examples: int = 10,
+) -> dict[str, Any]:
+    """
+    Creates train/val/test splits for the prepared segmentation dataset.
+
+    Uses:
+        MERGED_IMAGES_DIR
+        MERGED_MASKS_DIR
+
+    Saves:
+        SEGMENTATION_SPLITS_DIR / train.csv
+        SEGMENTATION_SPLITS_DIR / val.csv
+        SEGMENTATION_SPLITS_DIR / test.csv
+    """
     set_seed(seed)
 
-    image_files = list_images(MERGED_IMAGES_DIR)
-    ids = [p.stem for p in image_files]
+    train_csv = SEGMENTATION_SPLITS_DIR / "train.csv"
+    val_csv = SEGMENTATION_SPLITS_DIR / "val.csv"
+    test_csv = SEGMENTATION_SPLITS_DIR / "test.csv"
+    summary_json = SEGMENTATION_SPLITS_DIR / "split_summary.json"
 
-    if len(ids) == 0:
+    if not overwrite and train_csv.exists() and val_csv.exists() and test_csv.exists():
+        print("[SKIP] Segmentation splits already exist.")
+        if summary_json.exists():
+            with open(summary_json, "r", encoding="utf-8") as f:
+                summary = json.load(f)
+            print("[INFO] Existing split summary:", summary)
+            return summary
+
+        train_n = len(pd.read_csv(train_csv))
+        val_n = len(pd.read_csv(val_csv))
+        test_n = len(pd.read_csv(test_csv))
+        return {
+            "train": train_n,
+            "val": val_n,
+            "test": test_n,
+            "total_valid_pairs": train_n + val_n + test_n,
+            "seed": seed,
+            "val_ratio": val_ratio,
+            "test_ratio": test_ratio,
+            "overwrite": overwrite,
+            "require_masks": require_masks,
+        }
+
+    if val_ratio < 0 or test_ratio < 0:
+        raise ValueError("val_ratio and test_ratio must be >= 0")
+
+    if val_ratio + test_ratio >= 1.0:
+        raise ValueError("val_ratio + test_ratio must be < 1.0")
+
+    if not MERGED_IMAGES_DIR.exists():
+        raise RuntimeError(
+            f"[ERROR] Prepared segmentation images folder not found: {MERGED_IMAGES_DIR}\n"
+            "Run prepare_segmentation_dataset() first."
+        )
+
+    if require_masks and not MERGED_MASKS_DIR.exists():
+        raise RuntimeError(
+            f"[ERROR] Prepared segmentation masks folder not found: {MERGED_MASKS_DIR}\n"
+            "Run prepare_segmentation_dataset() first."
+        )
+
+    image_files = list_images(MERGED_IMAGES_DIR)
+
+    if len(image_files) == 0:
         raise RuntimeError(
             "[ERROR] No prepared segmentation images found. "
             "Run prepare_segmentation_dataset() first."
         )
 
-    random.shuffle(ids)
+    print("=" * 72)
+    print("CREATE SEGMENTATION SPLITS")
+    print("=" * 72)
+    print("images_dir     :", MERGED_IMAGES_DIR)
+    print("masks_dir      :", MERGED_MASKS_DIR)
+    print("num_images     :", len(image_files))
+    print("val_ratio      :", val_ratio)
+    print("test_ratio     :", test_ratio)
+    print("seed           :", seed)
+    print("overwrite      :", overwrite)
+    print("require_masks  :", require_masks)
+    print("=" * 72)
 
-    n = len(ids)
-    n_test = int(n * test_ratio)
-    n_val = int(n * val_ratio)
+    valid_ids: list[str] = []
+    missing_masks = 0
+    invalid_examples: list[str] = []
 
-    test_ids = ids[:n_test]
-    val_ids = ids[n_test:n_test + n_val]
-    train_ids = ids[n_test + n_val:]
+    for img_path in tqdm(image_files, desc="Validating split candidates", unit="img"):
+        img_id = img_path.stem
+
+        if require_masks:
+            mask_path = MERGED_MASKS_DIR / f"{img_id}.png"
+            if not mask_path.exists():
+                missing_masks += 1
+                if len(invalid_examples) < show_examples:
+                    invalid_examples.append(f"missing_mask: {img_id}")
+                continue
+
+        valid_ids.append(img_id)
+
+    n_total_found = len(image_files)
+    n_valid = len(valid_ids)
+
+    if n_valid == 0:
+        raise RuntimeError("[ERROR] No valid image-mask pairs found for splitting.")
+
+    random.shuffle(valid_ids)
+
+    n_test = int(round(n_valid * test_ratio))
+    n_val = int(round(n_valid * val_ratio))
+
+    if n_test + n_val >= n_valid:
+        if n_valid >= 3:
+            n_test = max(1, min(n_test, n_valid - 2))
+            n_val = max(1, min(n_val, n_valid - n_test - 1))
+        else:
+            raise RuntimeError(
+                f"[ERROR] Too few valid samples for requested split ratios: {n_valid}"
+            )
+
+    test_ids = valid_ids[:n_test]
+    val_ids = valid_ids[n_test:n_test + n_val]
+    train_ids = valid_ids[n_test + n_val:]
+
+    if len(train_ids) == 0:
+        raise RuntimeError("[ERROR] Train split would be empty.")
 
     ensure_dir(SEGMENTATION_SPLITS_DIR)
 
-    pd.DataFrame({"id": train_ids}).to_csv(SEGMENTATION_SPLITS_DIR / "train.csv", index=False)
-    pd.DataFrame({"id": val_ids}).to_csv(SEGMENTATION_SPLITS_DIR / "val.csv", index=False)
-    pd.DataFrame({"id": test_ids}).to_csv(SEGMENTATION_SPLITS_DIR / "test.csv", index=False)
+    pd.DataFrame({"id": train_ids}).to_csv(train_csv, index=False)
+    pd.DataFrame({"id": val_ids}).to_csv(val_csv, index=False)
+    pd.DataFrame({"id": test_ids}).to_csv(test_csv, index=False)
 
-    summary = {
+    summary: dict[str, Any] = {
         "train": len(train_ids),
         "val": len(val_ids),
         "test": len(test_ids),
-        "total": n,
+        "total_valid_pairs": n_valid,
+        "total_images_found": n_total_found,
+        "missing_masks": missing_masks,
+        "seed": seed,
+        "val_ratio": float(val_ratio),
+        "test_ratio": float(test_ratio),
+        "overwrite": overwrite,
+        "require_masks": require_masks,
+        "train_csv": str(train_csv),
+        "val_csv": str(val_csv),
+        "test_csv": str(test_csv),
+        "invalid_examples": invalid_examples,
     }
-    save_json(summary, SEGMENTATION_SPLITS_DIR / "split_summary.json")
+    save_json(summary, summary_json)
 
-    print("[OK] Segmentation splits created:", summary)
+    print("\n" + "=" * 72)
+    print("CREATE SEGMENTATION SPLITS - SUMMARY")
+    print("=" * 72)
+    print("images found       :", n_total_found)
+    print("valid pairs        :", n_valid)
+    print("missing masks      :", missing_masks)
+    print("train              :", len(train_ids))
+    print("val                :", len(val_ids))
+    print("test               :", len(test_ids))
+    print("summary json       :", summary_json)
+    if invalid_examples:
+        print("example invalids   :")
+        for item in invalid_examples[:show_examples]:
+            print(" -", item)
+    print("=" * 72)
+
     return summary
 
 
@@ -280,12 +433,10 @@ def load_pair(img_path: tf.Tensor, mask_path: tf.Tensor):
 
 
 def augment_pair(image: tf.Tensor, mask: tf.Tensor):
-    # shared flip
     flip = tf.random.uniform(()) > 0.5
     image = tf.cond(flip, lambda: tf.image.flip_left_right(image), lambda: image)
     mask = tf.cond(flip, lambda: tf.image.flip_left_right(mask), lambda: mask)
 
-    # small brightness/contrast only on image
     image = tf.image.random_brightness(image, max_delta=0.05)
     image = tf.image.random_contrast(image, lower=0.95, upper=1.05)
     image = tf.clip_by_value(image, 0.0, 1.0)
@@ -409,8 +560,6 @@ def train_segmentation(
     learning_rate: float = 1e-3,
     batch_size: int = BATCH_SIZE,
 ) -> dict[str, list[float]]:
-    #set_seed(SEED)
-
     train_ds = build_dataset("train", batch_size=batch_size)
     val_ds = build_dataset("val", batch_size=batch_size)
 
@@ -508,7 +657,6 @@ def plot_training_history():
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4))
 
-    # loss
     axes[0].plot(df["loss"], label="train")
     if "val_loss" in df.columns:
         axes[0].plot(df["val_loss"], label="val")
@@ -517,7 +665,6 @@ def plot_training_history():
     axes[0].grid(True, alpha=0.3)
     axes[0].legend()
 
-    # dice
     if "dice_coef" in df.columns:
         axes[1].plot(df["dice_coef"], label="train")
     if "val_dice_coef" in df.columns:
@@ -527,7 +674,6 @@ def plot_training_history():
     axes[1].grid(True, alpha=0.3)
     axes[1].legend()
 
-    # iou
     if "iou_coef" in df.columns:
         axes[2].plot(df["iou_coef"], label="train")
     if "val_iou_coef" in df.columns:
@@ -650,6 +796,8 @@ def generate_classifier_variants(
     source_root: str | Path = RAW_DIR,
     threshold: float = 0.5,
     crop_margin: int = 10,
+    overwrite: bool = False,
+    show_every: int = 250,
 ) -> dict[str, Any]:
     """
     Generates lung_masks / lung_masked / lung_crop from the classifier dataset.
@@ -668,52 +816,119 @@ def generate_classifier_variants(
     if len(image_files) == 0:
         raise RuntimeError(f"[ERROR] No images found in: {source_root}")
 
-    count = 0
+    print("=" * 72)
+    print("GENERATE CLASSIFIER VARIANTS")
+    print("=" * 72)
+    print("source_root   :", source_root)
+    print("num_images    :", len(image_files))
+    print("threshold     :", threshold)
+    print("crop_margin   :", crop_margin)
+    print("overwrite     :", overwrite)
+    print("show_every    :", show_every)
+    print("=" * 72)
 
-    for path in image_files:
+    count = 0
+    skipped_existing = 0
+    errors = 0
+    error_examples: list[str] = []
+
+    start_time = time.time()
+
+    for idx, path in enumerate(
+        tqdm(image_files, desc="Generating classifier variants", unit="img"),
+        start=1,
+    ):
         rel = path.relative_to(source_root)
 
-        img = open_gray(path)
-        mask = predict_mask(model, img, threshold=threshold)
+        out_mask = LUNG_MASK_DIR / rel
+        out_masked = LUNG_MASKED_DIR / rel
+        out_crop = LUNG_CROP_DIR / rel
 
-        masked = apply_mask(img, mask)
-        crop = crop_to_mask(img, mask, margin=crop_margin)
+        if not overwrite and out_mask.exists() and out_masked.exists() and out_crop.exists():
+            skipped_existing += 1
+            continue
 
-        save_gray(mask, LUNG_MASK_DIR / rel)
-        save_gray(masked, LUNG_MASKED_DIR / rel)
-        save_gray(crop, LUNG_CROP_DIR / rel)
+        try:
+            img = open_gray(path)
+            mask = predict_mask(model, img, threshold=threshold)
 
-        count += 1
+            masked = apply_mask(img, mask)
+            crop = crop_to_mask(img, mask, margin=crop_margin)
+
+            save_gray(mask, out_mask)
+            save_gray(masked, out_masked)
+            save_gray(crop, out_crop)
+
+            count += 1
+        except Exception as e:
+            errors += 1
+            if len(error_examples) < 20:
+                error_examples.append(f"{path.name}: {e}")
+
+        if show_every > 0 and idx % show_every == 0:
+            elapsed = time.time() - start_time
+            rate = idx / elapsed if elapsed > 0 else 0.0
+            print(
+                f"[INFO] processed={idx}/{len(image_files)} | "
+                f"saved={count} | skipped_existing={skipped_existing} | "
+                f"errors={errors} | {rate:.1f} img/s"
+            )
+
+    elapsed = time.time() - start_time
 
     summary = {
         "source_root": str(source_root),
+        "num_images_found": len(image_files),
         "num_images_processed": count,
+        "num_skipped_existing": skipped_existing,
+        "num_errors": errors,
         "lung_mask_dir": str(LUNG_MASK_DIR),
         "lung_masked_dir": str(LUNG_MASKED_DIR),
         "lung_crop_dir": str(LUNG_CROP_DIR),
         "threshold": float(threshold),
         "crop_margin": int(crop_margin),
+        "overwrite": overwrite,
+        "elapsed_seconds": elapsed,
+        "images_per_second": (len(image_files) / elapsed) if elapsed > 0 else None,
+        "error_examples": error_examples,
     }
     save_json(summary, SEGMENTATION_DATA_DIR / "classifier_variants_summary.json")
 
+    print("\n" + "=" * 72)
     print("[OK] Generated classifier variants")
-    print(" -", LUNG_MASK_DIR)
-    print(" -", LUNG_MASKED_DIR)
-    print(" -", LUNG_CROP_DIR)
+    print("=" * 72)
+    print("images found       :", len(image_files))
+    print("newly saved        :", count)
+    print("skipped existing   :", skipped_existing)
+    print("errors             :", errors)
+    print("lung_mask_dir      :", LUNG_MASK_DIR)
+    print("lung_masked_dir    :", LUNG_MASKED_DIR)
+    print("lung_crop_dir      :", LUNG_CROP_DIR)
+    print(f"elapsed            : {elapsed:.2f} sec")
+    if elapsed > 0:
+        print(f"speed              : {len(image_files) / elapsed:.2f} img/s")
+    if error_examples:
+        print("example errors     :")
+        for item in error_examples[:10]:
+            print(" -", item)
+    print("=" * 72)
 
     return summary
 
 
-# backward compatible alias
 def generate_dataset_variants(
     source_root: str | Path = RAW_DIR,
     threshold: float = 0.5,
     crop_margin: int = 10,
+    overwrite: bool = False,
+    show_every: int = 250,
 ):
     return generate_classifier_variants(
         source_root=source_root,
         threshold=threshold,
         crop_margin=crop_margin,
+        overwrite=overwrite,
+        show_every=show_every,
     )
 
 
@@ -729,7 +944,8 @@ def run_full_segmentation_pipeline(
     crop_margin: int = 10,
 ) -> dict[str, Any]:
     prepare_segmentation_dataset()
-    split_summary = create_splits()
+    split_summary = create_splits(overwrite=True)
+
     history = train_segmentation(
         epochs=epochs,
         learning_rate=learning_rate,
@@ -760,6 +976,7 @@ def run_full_segmentation_pipeline(
         "epochs": int(epochs),
         "learning_rate": float(learning_rate),
         "batch_size": int(batch_size),
+        "history_keys": list(history.keys()),
     }
     save_json(result, SEG_MODEL_DIR / "pipeline_summary.json")
     return result
