@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from PIL import Image
+from tqdm.auto import tqdm
 
 import tensorflow as tf
 
@@ -57,26 +58,30 @@ def list_images(
 
 
 def open_gray(path: str | Path) -> np.ndarray:
-    img = Image.open(path).convert("L")
-    return np.array(img)
+    with Image.open(path) as img:
+        return np.array(img.convert("L"))
 
 
 def save_gray(arr: np.ndarray, path: str | Path) -> None:
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(arr.astype(np.uint8)).save(path)
 
 
-# =========================================================
-# Dataset preparation
-# =========================================================
-def prepare_segmentation_dataset() -> int:
+def prepare_segmentation_dataset(
+    overwrite: bool = False,
+    show_every: int = 250,
+) -> int:
     """
-    Prepares the segmentation dataset from the flattened raw structure:
+    Prepares the segmentation dataset from:
 
         SEGMENTATION_RAW_DIR / images
         SEGMENTATION_RAW_DIR / masks
 
-    and writes normalized PNG image-mask pairs into: MERGED_IMAGES_DIR, MERGED_MASKS_DIR
+    and writes normalized PNG image-mask pairs into:
+
+        SEGMENTATION_DATA_DIR / images
+        SEGMENTATION_DATA_DIR / masks
     """
     raw_images_dir = SEGMENTATION_RAW_DIR / "images"
     raw_masks_dir = SEGMENTATION_RAW_DIR / "masks"
@@ -87,7 +92,6 @@ def prepare_segmentation_dataset() -> int:
     ensure_dir(merged_images_dir)
     ensure_dir(merged_masks_dir)
 
-    
     if not raw_images_dir.exists():
         raise RuntimeError(
             f"[ERROR] Segmentation images folder not found: {raw_images_dir}\n"
@@ -105,52 +109,110 @@ def prepare_segmentation_dataset() -> int:
     if len(image_files) == 0:
         raise RuntimeError(f"[ERROR] No images found in: {raw_images_dir}")
 
+    print("=" * 72)
+    print("PREPARE SEGMENTATION DATASET")
+    print("=" * 72)
+    print("raw_images_dir   :", raw_images_dir)
+    print("raw_masks_dir    :", raw_masks_dir)
+    print("merged_images_dir:", merged_images_dir)
+    print("merged_masks_dir :", merged_masks_dir)
+    print("num_images_found :", len(image_files))
+    print("overwrite        :", overwrite)
+    print("=" * 72)
+
     count = 0
     missing_masks = 0
-    skipped: list[str] = []
-    
-    for img_path in image_files:
+    skipped_validation = 0
+    skipped_existing = 0
+    skipped_examples: list[str] = []
+
+    start_time = time.time()
+
+    for idx, img_path in enumerate(tqdm(image_files, desc="Preparing pairs", unit="img"), start=1):
         mask_path = raw_masks_dir / img_path.name
         if not mask_path.exists():
             missing_masks += 1
-            skipped.append(img_path.name)
+            if len(skipped_examples) < 20:
+                skipped_examples.append(f"missing_mask: {img_path.name}")
             continue
-
-        img = open_gray(img_path)
-        mask = open_gray(mask_path)
-
-        if img.shape[:2] != mask.shape[:2]:
-            skipped.append(img_path.name)
-            continue
-        
-        mask = (mask > 0).astype(np.uint8) * 255
 
         out_img = merged_images_dir / f"{img_path.stem}.png"
         out_mask = merged_masks_dir / f"{img_path.stem}.png"
+
+        if not overwrite and out_img.exists() and out_mask.exists():
+            skipped_existing += 1
+            continue
+
+        try:
+            img = open_gray(img_path)
+            mask = open_gray(mask_path)
+        except Exception as e:
+            skipped_validation += 1
+            if len(skipped_examples) < 20:
+                skipped_examples.append(f"read_error: {img_path.name} ({e})")
+            continue
+
+        if img.shape[:2] != mask.shape[:2]:
+            skipped_validation += 1
+            if len(skipped_examples) < 20:
+                skipped_examples.append(
+                    f"shape_mismatch: {img_path.name} img={img.shape} mask={mask.shape}"
+                )
+            continue
+
+        mask = (mask > 0).astype(np.uint8) * 255
 
         save_gray(img, out_img)
         save_gray(mask, out_mask)
         count += 1
 
-    summary = {
+        if show_every > 0 and idx % show_every == 0:
+            elapsed = time.time() - start_time
+            rate = idx / elapsed if elapsed > 0 else 0.0
+            print(
+                f"[INFO] processed={idx}/{len(image_files)} | "
+                f"saved={count} | missing_masks={missing_masks} | "
+                f"skipped_validation={skipped_validation} | "
+                f"skipped_existing={skipped_existing} | "
+                f"{rate:.1f} img/s"
+            )
+
+    elapsed = time.time() - start_time
+
+    summary: dict[str, Any] = {
         "source_root": str(SEGMENTATION_RAW_DIR),
         "image_dir": str(raw_images_dir),
         "mask_dir": str(raw_masks_dir),
+        "merged_images_dir": str(merged_images_dir),
+        "merged_masks_dir": str(merged_masks_dir),
         "num_images_found": len(image_files),
         "num_pairs_saved": count,
         "num_missing_masks": missing_masks,
-        "num_skipped": len(skipped),
-        "skipped_examples": skipped[:20],
+        "num_skipped_validation": skipped_validation,
+        "num_skipped_existing": skipped_existing,
+        "elapsed_seconds": elapsed,
+        "images_per_second": (len(image_files) / elapsed) if elapsed > 0 else None,
+        "skipped_examples": skipped_examples,
+        "overwrite": overwrite,
     }
     save_json(summary, SEGMENTATION_DATA_DIR / "prepare_summary.json")
 
-    print(f"[OK] Prepared segmentation dataset: {count} pairs")
-    if missing_masks:
-        print(f"[WARN] Missing masks for {missing_masks} images")
-    if skipped and len(skipped) != missing_masks:
-        print(f"[WARN] Skipped {len(skipped) - missing_masks} pairs due to validation issues")
+    print("\n" + "=" * 72)
+    print("[OK] Prepared segmentation dataset")
+    print("=" * 72)
+    print("images found       :", len(image_files))
+    print("pairs saved        :", count)
+    print("missing masks      :", missing_masks)
+    print("skipped validation :", skipped_validation)
+    print("skipped existing   :", skipped_existing)
+    print(f"elapsed            : {elapsed:.2f} sec")
+    if elapsed > 0:
+        print(f"speed              : {len(image_files) / elapsed:.2f} img/s")
+    print("=" * 72)
 
     return count
+
+
 # =========================================================
 # Splits
 # =========================================================
