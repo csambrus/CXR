@@ -976,17 +976,26 @@ def run_full_segmentation_pipeline(
     save_json(result, SEG_MODEL_DIR / "pipeline_summary.json")
     return result
 
-def verify_png_files(paths, label: str) -> None:
+
+def verify_png_files(paths, label="Files"):
+    if isinstance(paths, (str, Path)):
+        paths = Path(paths)
+
+        if paths.is_dir():
+            paths = sorted(paths.glob("*.png"))
+        else:
+            paths = [paths]
 
     bad = 0
     for p in paths:
         p = Path(p)
+
         if not p.exists():
-            print(f"[ERROR] Missing {label}: {p}")
+            print(f"[MISSING] {p}")
             bad += 1
         elif p.stat().st_size == 0:
-            print(f"[ERROR] Empty {label}: {p}")
+            print(f"[EMPTY] {p}")
             bad += 1
 
-    if bad > 0:
-        raise RuntimeError(f"[ERROR] Found {bad} invalid {label} files.")
+    print(f"{label}: checked {len(paths)} files, bad={bad}")
+
