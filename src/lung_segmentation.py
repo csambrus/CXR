@@ -80,10 +80,7 @@ def prepare_segmentation_dataset() -> int:
         SEGMENTATION_RAW_DIR / images
         SEGMENTATION_RAW_DIR / masks
 
-    and writes normalized PNG image-mask pairs into:
-
-        MERGED_DIR / images
-        MERGED_DIR / masks
+    and writes normalized PNG image-mask pairs into: MERGED_IMAGES_DIR, MERGED_MASKS_DIR
     """
     raw_images_dir = SEGMENTATION_RAW_DIR / "images"
     raw_masks_dir = SEGMENTATION_RAW_DIR / "masks"
@@ -137,7 +134,7 @@ def prepare_segmentation_dataset() -> int:
         "num_pairs_saved": count,
         "num_missing_masks": missing_masks,
     }
-    save_json(summary, MERGED_DIR / "prepare_summary.json")
+    save_json(summary, SEGMENTATION_DATA_DIR / "prepare_summary.json")
 
     print(f"[OK] Prepared segmentation dataset: {count} pairs")
     if missing_masks:
