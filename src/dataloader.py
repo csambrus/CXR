@@ -89,6 +89,8 @@ def save_split_csv(df: pd.DataFrame, path: str | Path) -> None:
 # Split creation
 # =========================================================
 
+
+
 def build_metadata_dataframe(source_root: str | Path = RAW_DIR) -> pd.DataFrame:
     source_root = Path(source_root)
 
@@ -98,7 +100,8 @@ def build_metadata_dataframe(source_root: str | Path = RAW_DIR) -> pd.DataFrame:
     rows: list[dict] = []
 
     for class_info in CLASS_INFOS:
-        class_dir = source_root / class_info.raw_dir.name
+        raw_dir_name = Path(class_info.raw_dir).name
+        class_dir = source_root / raw_dir_name
 
         if not class_dir.exists():
             raise RuntimeError(
@@ -125,7 +128,6 @@ def build_metadata_dataframe(source_root: str | Path = RAW_DIR) -> pd.DataFrame:
 
     df = df[SPLIT_COLUMNS].copy()
     return df
-
 
 def create_splits(
     source_root: str | Path = RAW_DIR,
