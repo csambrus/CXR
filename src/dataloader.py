@@ -89,7 +89,16 @@ def save_split_csv(df: pd.DataFrame, path: str | Path) -> None:
 # Split creation
 # =========================================================
 
+def get_class_key(class_info) -> str:
+    return getattr(class_info, "class_key", getattr(class_info, "key", ""))
 
+
+def get_class_name(class_info) -> str:
+    return getattr(class_info, "class_name", getattr(class_info, "name", ""))
+
+
+def get_class_label(class_info) -> int:
+    return int(getattr(class_info, "label", getattr(class_info, "label_index", -1)))
 
 def build_metadata_dataframe(source_root: str | Path = RAW_DIR) -> pd.DataFrame:
     source_root = Path(source_root)
@@ -115,9 +124,9 @@ def build_metadata_dataframe(source_root: str | Path = RAW_DIR) -> pd.DataFrame:
                 {
                     "relative_path": str(path.relative_to(source_root)),
                     "filename": path.name,
-                    "class_key": class_info.class_key,
-                    "class_name": class_info.class_name,
-                    "label": int(class_info.label),
+                    "class_key": get_class_key(class_info),
+                    "class_name": get_class_name(class_info),
+                    "label": get_class_label(class_info),
                 }
             )
 
