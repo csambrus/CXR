@@ -1,3 +1,5 @@
+# train.py
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,7 +9,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import tensorflow as tf
 
-from src.runtime import set_seed 
+from src.runtime import set_seed
 
 from src.config import (
     BATCH_SIZE,
@@ -63,11 +65,13 @@ def build_transfer_model(
     pretrained: bool = True,
 ) -> tuple[tf.keras.Model, tf.keras.Model]:
     name = model_name.lower()
-
     base_weights = "imagenet" if pretrained else None
 
-    rgb_input = tf.keras.Input(shape=input_shape, name="grayscale_input")
-    x = tf.keras.layers.Concatenate()([rgb_input, rgb_input, rgb_input])
+    inputs = tf.keras.Input(shape=input_shape, name="grayscale_input")
+
+    x = tf.keras.layers.Concatenate(name="gray_to_rgb")(
+        [inputs, inputs, inputs]
+    )
 
     if name == "resnet50":
         preprocess = tf.keras.applications.resnet50.preprocess_input
@@ -93,15 +97,20 @@ def build_transfer_model(
     else:
         raise ValueError(f"Unsupported model_name: {model_name}")
 
-    y = tf.keras.layers.Lambda(preprocess, name="preprocess_input")(x)
-    y = base_model(y, training=False)
-    y = tf.keras.layers.GlobalAveragePooling2D()(y)
-    y = tf.keras.layers.Dropout(0.3)(y)
-    y = tf.keras.layers.Dense(256, activation="relu")(y)
-    y = tf.keras.layers.Dropout(0.2)(y)
-    outputs = tf.keras.layers.Dense(num_classes, activation="softmax")(y)
+    x = tf.keras.layers.Lambda(preprocess, name="preprocess_input")(x)
+    x = base_model(x, training=False)
+    x = tf.keras.layers.GlobalAveragePooling2D(name="gap")(x)
+    x = tf.keras.layers.Dropout(0.3, name="head_dropout_1")(x)
+    x = tf.keras.layers.Dense(256, activation="relu", name="head_dense")(x)
+    x = tf.keras.layers.Dropout(0.2, name="head_dropout_2")(x)
 
-    model = tf.keras.Model(rgb_input, outputs, name=name)
+    outputs = tf.keras.layers.Dense(
+        num_classes,
+        activation="softmax",
+        name="predictions",
+    )(x)
+
+    model = tf.keras.Model(inputs, outputs, name=name)
     return model, base_model
 
 
@@ -114,7 +123,11 @@ def build_model(
     name = model_name.lower()
 
     if name == "baseline_cnn":
-        return build_baseline_cnn(input_shape=input_shape, num_classes=num_classes), None
+        model = build_baseline_cnn(
+            input_shape=input_shape,
+            num_classes=num_classes,
+        )
+        return model, None
 
     return build_transfer_model(
         model_name=name,
@@ -129,18 +142,28 @@ def build_model(
 # =========================================================
 
 def compile_model(model: tf.keras.Model, learning_rate: float) -> None:
+    """
+    Sparse multiclass setup:
+
+    - labels: integer class ids, shape: (batch,)
+    - predictions: softmax probabilities, shape: (batch, NUM_CLASSES)
+
+    Do NOT use tf.keras.metrics.Recall / Precision / AUC here directly,
+    because those expect binary/multilabel-style compatible shapes.
+    Macro recall / F1 / ROC-AUC should be computed later in evaluate.py.
+    """
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
         loss="sparse_categorical_crossentropy",
         metrics=[
-            "accuracy",
-            tf.keras.metrics.Recall(name="recall"),
+            tf.keras.metrics.SparseCategoricalAccuracy(name="accuracy"),
         ],
     )
 
 
 def build_callbacks(out_dir: str | Path) -> list[tf.keras.callbacks.Callback]:
     out_dir = Path(out_dir)
+    ensure_dir(out_dir)
 
     return [
         tf.keras.callbacks.ModelCheckpoint(
@@ -177,41 +200,41 @@ def plot_training_history(
     save_path: str | Path,
     title: str,
 ) -> None:
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+    save_path = Path(save_path)
+    ensure_dir(save_path.parent)
 
-    # loss
-    axes[0].plot(history_df["loss"], label="train")
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    if "loss" in history_df.columns:
+        axes[0].plot(history_df["loss"], label="train")
     if "val_loss" in history_df.columns:
         axes[0].plot(history_df["val_loss"], label="val")
+
     axes[0].set_title("Loss")
     axes[0].set_xlabel("Epoch")
     axes[0].grid(True, alpha=0.3)
     axes[0].legend()
 
-    # accuracy
     if "accuracy" in history_df.columns:
         axes[1].plot(history_df["accuracy"], label="train")
     if "val_accuracy" in history_df.columns:
         axes[1].plot(history_df["val_accuracy"], label="val")
+
     axes[1].set_title("Accuracy")
     axes[1].set_xlabel("Epoch")
     axes[1].grid(True, alpha=0.3)
     axes[1].legend()
 
-    # recall
-    if "recall" in history_df.columns:
-        axes[2].plot(history_df["recall"], label="train")
-    if "val_recall" in history_df.columns:
-        axes[2].plot(history_df["val_recall"], label="val")
-    axes[2].set_title("Recall")
-    axes[2].set_xlabel("Epoch")
-    axes[2].grid(True, alpha=0.3)
-    axes[2].legend()
-
     fig.suptitle(title)
     fig.tight_layout()
     fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
     plt.close(fig)
+
+
+def _add_epoch_column(history_df: pd.DataFrame) -> pd.DataFrame:
+    history_df = history_df.copy()
+    history_df.insert(0, "epoch", range(1, len(history_df) + 1))
+    return history_df
 
 
 # =========================================================
@@ -237,7 +260,9 @@ def run_training(
 
     if data_root is None:
         data_root = get_data_root(data_variant)
+
     data_root = Path(data_root)
+    split_dir = Path(split_dir)
 
     model_out_dir = ensure_dir(Path(out_dir) / f"{model_name}_{data_variant}")
 
@@ -247,7 +272,7 @@ def run_training(
     print("model_name   :", model_name)
     print("data_variant :", data_variant)
     print("data_root    :", data_root)
-    print("split_dir    :", Path(split_dir))
+    print("split_dir    :", split_dir)
     print("out_dir      :", model_out_dir)
     print("pretrained   :", pretrained)
     print("fine_tuning  :", do_fine_tuning)
@@ -276,8 +301,9 @@ def run_training(
         base_model.trainable = False
 
     compile_model(model, learning_rate=learning_rate_head)
-
     callbacks = build_callbacks(model_out_dir)
+
+    history_frames: list[pd.DataFrame] = []
 
     history_head = model.fit(
         train_ds,
@@ -287,10 +313,16 @@ def run_training(
         verbose=1,
     )
 
-    history_frames = [pd.DataFrame(history_head.history)]
-    history_frames[0]["phase"] = "head"
+    head_df = pd.DataFrame(history_head.history)
+    head_df["phase"] = "head"
+    head_df["epoch_global"] = range(1, len(head_df) + 1)
+    history_frames.append(head_df)
 
     if do_fine_tuning and base_model is not None and epochs_finetune > 0:
+        print("=" * 72)
+        print("FINE-TUNING")
+        print("=" * 72)
+
         base_model.trainable = True
 
         compile_model(model, learning_rate=learning_rate_finetune)
@@ -306,6 +338,10 @@ def run_training(
 
         ft_df = pd.DataFrame(history_ft.history)
         ft_df["phase"] = "finetune"
+        ft_df["epoch_global"] = range(
+            len(head_df) + 1,
+            len(head_df) + len(ft_df) + 1,
+        )
         history_frames.append(ft_df)
 
     history_df = pd.concat(history_frames, ignore_index=True)
@@ -326,18 +362,35 @@ def run_training(
         "model_name": model_name,
         "data_variant": data_variant,
         "data_root": str(data_root),
-        "split_dir": str(Path(split_dir)),
+        "split_dir": str(split_dir),
         "out_dir": str(model_out_dir),
         "best_model_path": str(best_model_path),
         "last_model_path": str(final_model_path),
         "class_names": get_class_names(),
+        "num_classes": int(NUM_CLASSES),
+        "input_shape": [int(image_size[0]), int(image_size[1]), 1],
         "pretrained": bool(pretrained),
         "do_fine_tuning": bool(do_fine_tuning),
         "epochs_head": int(epochs_head),
         "epochs_finetune": int(epochs_finetune),
         "learning_rate_head": float(learning_rate_head),
         "learning_rate_finetune": float(learning_rate_finetune),
+        "batch_size": int(batch_size),
+        "metrics": [
+            "accuracy",
+        ],
+        "loss": "sparse_categorical_crossentropy",
     }
+
     save_json(summary, model_out_dir / "train_summary.json")
+
+    print("=" * 72)
+    print("[OK] Training finished")
+    print("=" * 72)
+    print("model_name      :", model_name)
+    print("data_variant    :", data_variant)
+    print("best_model_path :", best_model_path)
+    print("last_model_path :", final_model_path)
+    print("=" * 72)
 
     return summary
