@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import tensorflow as tf
 
+from src.runtime import set_seed 
+
 from src.config import (
     BATCH_SIZE,
     IMAGE_SIZE,
@@ -19,7 +21,6 @@ from src.config import (
     get_class_names,
     get_data_root,
     save_json,
-    set_global_seed,
 )
 from src.dataloader import build_datasets_from_split_csvs, build_default_augmentation
 
@@ -232,7 +233,7 @@ def run_training(
     batch_size: int = BATCH_SIZE,
     image_size: tuple[int, int] = IMAGE_SIZE,
 ) -> dict[str, Any]:
-    set_global_seed(SEED)
+    set_seed(SEED)
 
     if data_root is None:
         data_root = get_data_root(data_variant)
