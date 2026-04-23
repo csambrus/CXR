@@ -213,9 +213,15 @@ def run_evaluation(
     model = tf.keras.models.load_model(model_path, safe_mode=False)
 
     eval_result = model.evaluate(test_ds, verbose=1)
+
     if isinstance(eval_result, list):
-        loss = float(eval_result[0])
+        keras_eval_metrics = {
+            name: float(value)
+            for name, value in zip(model.metrics_names, eval_result)
+        }
+        loss = float(keras_eval_metrics.get("loss", eval_result[0]))
     else:
+        keras_eval_metrics = {"loss": float(eval_result)}
         loss = float(eval_result)
 
     y_true, y_pred, y_prob = collect_predictions(model, test_ds)
@@ -262,6 +268,7 @@ def run_evaluation(
         "split_dir": str(Path(split_dir)),
         "data_root": str(data_root),
         "out_dir": str(eval_out_dir),
+        "keras_eval_metrics": keras_eval_metrics,
         "metrics": metrics,
     }
     save_json(summary, eval_out_dir / "metrics.json")
