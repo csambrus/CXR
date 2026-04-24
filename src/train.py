@@ -64,6 +64,13 @@ def build_transfer_model(
     num_classes: int = NUM_CLASSES,
     pretrained: bool = True,
 ) -> tuple[tf.keras.Model, tf.keras.Model]:
+    """
+    Transfer model grayscale -> RGB.
+
+    Fontos:
+    Nem használunk Lambda(preprocess_input) réteget, mert Keras 3 / TF 2.19 alatt
+    .keras mentés-betöltéskor deszerializációs hibát okozhat.
+    """
     name = model_name.lower()
     base_weights = "imagenet" if pretrained else None
 
@@ -74,30 +81,35 @@ def build_transfer_model(
     )
 
     if name == "resnet50":
-        preprocess = tf.keras.applications.resnet50.preprocess_input
+        # A dataloader 0..1 közé skáláz. ResNet/VGG ImageNet súlyokhoz
+        # legalább 0..255 tartományra visszaskálázzuk, Lambda nélkül.
+        x = tf.keras.layers.Rescaling(255.0, name="scale_to_255")(x)
         base_model = tf.keras.applications.ResNet50(
             include_top=False,
             weights=base_weights,
             input_shape=(input_shape[0], input_shape[1], 3),
         )
+
     elif name == "vgg16":
-        preprocess = tf.keras.applications.vgg16.preprocess_input
+        x = tf.keras.layers.Rescaling(255.0, name="scale_to_255")(x)
         base_model = tf.keras.applications.VGG16(
             include_top=False,
             weights=base_weights,
             input_shape=(input_shape[0], input_shape[1], 3),
         )
+
     elif name == "efficientnetb0":
-        preprocess = tf.keras.applications.efficientnet.preprocess_input
+        # EfficientNetB0 Keras alatt 0..1 inputtal is jól kezelhető,
+        # ezért itt nem skálázzuk vissza 255-re.
         base_model = tf.keras.applications.EfficientNetB0(
             include_top=False,
             weights=base_weights,
             input_shape=(input_shape[0], input_shape[1], 3),
         )
+
     else:
         raise ValueError(f"Unsupported model_name: {model_name}")
 
-    x = tf.keras.layers.Lambda(preprocess, name="preprocess_input")(x)
     x = base_model(x, training=False)
     x = tf.keras.layers.GlobalAveragePooling2D(name="gap")(x)
     x = tf.keras.layers.Dropout(0.3, name="head_dropout_1")(x)
@@ -148,9 +160,9 @@ def compile_model(model: tf.keras.Model, learning_rate: float) -> None:
     - labels: integer class ids, shape: (batch,)
     - predictions: softmax probabilities, shape: (batch, NUM_CLASSES)
 
-    Do NOT use tf.keras.metrics.Recall / Precision / AUC here directly,
-    because those expect binary/multilabel-style compatible shapes.
-    Macro recall / F1 / ROC-AUC should be computed later in evaluate.py.
+    Ne használjunk itt tf.keras.metrics.Recall / Precision / AUC metrikákat,
+    mert azok sparse multiclass esetben shape hibát okozhatnak.
+    Macro recall / F1 / ROC-AUC később evaluate.py-ban számolandó.
     """
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
@@ -229,12 +241,6 @@ def plot_training_history(
     fig.tight_layout()
     fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
     plt.close(fig)
-
-
-def _add_epoch_column(history_df: pd.DataFrame) -> pd.DataFrame:
-    history_df = history_df.copy()
-    history_df.insert(0, "epoch", range(1, len(history_df) + 1))
-    return history_df
 
 
 # =========================================================
@@ -376,9 +382,7 @@ def run_training(
         "learning_rate_head": float(learning_rate_head),
         "learning_rate_finetune": float(learning_rate_finetune),
         "batch_size": int(batch_size),
-        "metrics": [
-            "accuracy",
-        ],
+        "metrics": ["accuracy"],
         "loss": "sparse_categorical_crossentropy",
     }
 
