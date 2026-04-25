@@ -49,6 +49,13 @@ def collect_predictions(
 
     y_true = np.concatenate(y_true_all, axis=0)
     y_prob = np.concatenate(y_prob_all, axis=0)
+
+    if not np.all(np.isfinite(y_prob)):
+        raise ValueError(
+            "[ERROR] A modell predikciója NaN vagy inf értéket tartalmaz. "
+            "Ellenőrizd a tanítást, preprocessinget és input skálázást."
+        )
+
     y_pred = np.argmax(y_prob, axis=1)
 
     return y_true, y_pred, y_prob
@@ -98,8 +105,11 @@ def plot_confusion_and_roc_row(
     model_name: str,
     save_path: str | Path,
 ):
-    cm = confusion_matrix(y_true, y_pred)
-    cm_norm = confusion_matrix(y_true, y_pred, normalize="true")
+    labels = list(range(len(class_names)))
+
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    cm_norm = confusion_matrix(y_true, y_pred, labels=labels, normalize="true")
+    cm_norm = np.nan_to_num(cm_norm)
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
@@ -236,6 +246,7 @@ def run_evaluation(
     report_dict = classification_report(
         y_true,
         y_pred,
+        labels=list(range(NUM_CLASSES)),
         target_names=class_names,
         output_dict=True,
         zero_division=0,
