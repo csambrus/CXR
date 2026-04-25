@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import pandas as pd
 import tensorflow as tf
@@ -33,7 +34,7 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
 # =========================================================
 
 def resolve_image_path(root_dir: str | Path, relative_path: str) -> str:
-    return str(Path(root_dir) / relative_path)
+    return str(Path(root_dir) / str(relative_path))
 
 
 def list_images(directory: str | Path) -> list[Path]:
@@ -45,12 +46,140 @@ def list_images(directory: str | Path) -> list[Path]:
 
 
 # =========================================================
+# CLASS_INFOS compatibility helpers
+# =========================================================
+
+def _class_info_to_dict(class_info: Any) -> dict[str, Any]:
+    """
+    CLASS_INFOS többféle alakját is kezeli:
+    - dataclass
+    - namedtuple
+    - egyszerű objektum attribútumokkal
+    - tuple/list: (class_key, raw_dir, display_name/class_name, label)
+
+    A korábbi hiba oka az volt, hogy a kód csak néhány mezőnevet ismert
+    (class_name/name, label/label_index). Ha a config-ban display_name vagy
+    más név szerepelt, akkor üres class_name és -1 label került a CSV-be.
+    """
+    if is_dataclass(class_info):
+        return asdict(class_info)
+
+    if hasattr(class_info, "_asdict"):
+        return dict(class_info._asdict())
+
+    if isinstance(class_info, dict):
+        return dict(class_info)
+
+    if isinstance(class_info, (tuple, list)):
+        keys = ["class_key", "raw_dir", "display_name", "label"]
+        return {k: class_info[i] for i, k in enumerate(keys) if i < len(class_info)}
+
+    # Általános objektum: csak a publikus attribútumokat vesszük.
+    return {
+        k: getattr(class_info, k)
+        for k in dir(class_info)
+        if not k.startswith("_") and not callable(getattr(class_info, k))
+    }
+
+
+def _first_present(data: dict[str, Any], names: list[str], default: Any = None) -> Any:
+    for name in names:
+        if name in data and data[name] is not None:
+            return data[name]
+    return default
+
+
+def get_class_key(class_info: Any) -> str:
+    data = _class_info_to_dict(class_info)
+    value = _first_present(
+        data,
+        ["class_key", "key", "slug", "id"],
+        default=None,
+    )
+    if value is None:
+        raise ValueError(f"Cannot determine class_key from CLASS_INFOS item: {class_info!r}")
+    return str(value)
+
+
+def get_class_name(class_info: Any) -> str:
+    data = _class_info_to_dict(class_info)
+    value = _first_present(
+        data,
+        ["class_name", "display_name", "name", "label_name", "title"],
+        default=None,
+    )
+    if value is None:
+        raise ValueError(f"Cannot determine class_name/display_name from CLASS_INFOS item: {class_info!r}")
+    return str(value)
+
+
+def get_class_label(class_info: Any) -> int:
+    data = _class_info_to_dict(class_info)
+    value = _first_present(
+        data,
+        ["label", "label_index", "label_id", "idx", "index"],
+        default=None,
+    )
+    if value is None:
+        raise ValueError(f"Cannot determine label from CLASS_INFOS item: {class_info!r}")
+    return int(value)
+
+
+def get_class_raw_dir(class_info: Any) -> Path:
+    data = _class_info_to_dict(class_info)
+    value = _first_present(
+        data,
+        ["raw_dir", "dir", "directory", "folder", "path"],
+        default=None,
+    )
+    if value is None:
+        raise ValueError(f"Cannot determine raw_dir from CLASS_INFOS item: {class_info!r}")
+    return Path(value)
+
+
+def validate_class_infos() -> pd.DataFrame:
+    """Ellenőrzi, hogy a config.CLASS_INFOS minden szükséges mezőt kiad-e."""
+    rows: list[dict[str, Any]] = []
+
+    for class_info in CLASS_INFOS:
+        rows.append(
+            {
+                "class_key": get_class_key(class_info),
+                "class_name": get_class_name(class_info),
+                "label": get_class_label(class_info),
+                "raw_dir": str(get_class_raw_dir(class_info)),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+
+    if df["class_key"].isna().any() or (df["class_key"].astype(str).str.len() == 0).any():
+        raise ValueError("CLASS_INFOS contains empty class_key values.")
+
+    if df["class_name"].isna().any() or (df["class_name"].astype(str).str.len() == 0).any():
+        raise ValueError("CLASS_INFOS contains empty class_name/display_name values.")
+
+    if df["label"].isna().any() or (df["label"].astype(int) < 0).any():
+        raise ValueError("CLASS_INFOS contains invalid negative/empty label values.")
+
+    if df["class_key"].duplicated().any():
+        dup = df.loc[df["class_key"].duplicated(), "class_key"].tolist()
+        raise ValueError(f"Duplicate class_key values in CLASS_INFOS: {dup}")
+
+    if df["label"].duplicated().any():
+        dup = df.loc[df["label"].duplicated(), "label"].tolist()
+        raise ValueError(f"Duplicate label values in CLASS_INFOS: {dup}")
+
+    return df.sort_values("label").reset_index(drop=True)
+
+
+# =========================================================
 # Split CSV handling
 # =========================================================
 
 def read_split_csv(split_csv_path: str | Path) -> pd.DataFrame:
     split_csv_path = Path(split_csv_path)
-    df = pd.read_csv(split_csv_path)
+    df = pd.read_csv(split_csv_path, keep_default_na=False)
 
     missing = REQUIRED_SPLIT_COLUMNS - set(df.columns)
     if missing:
@@ -65,7 +194,14 @@ def read_split_csv(split_csv_path: str | Path) -> pd.DataFrame:
     df["filename"] = df["filename"].astype(str)
     df["class_key"] = df["class_key"].astype(str)
     df["class_name"] = df["class_name"].astype(str)
-    df["label"] = df["label"].astype(int)
+    df["label"] = pd.to_numeric(df["label"], errors="raise").astype(int)
+
+    bad = df[(df["label"] < 0) | (df["class_key"].str.len() == 0) | (df["class_name"].str.len() == 0)]
+    if len(bad) > 0:
+        raise ValueError(
+            f"Invalid rows in split CSV: {split_csv_path}\n"
+            f"Examples:\n{bad.head(10).to_string(index=False)}"
+        )
 
     return df
 
@@ -82,6 +218,14 @@ def save_split_csv(df: pd.DataFrame, path: str | Path) -> None:
         )
 
     df = df[SPLIT_COLUMNS].copy()
+
+    if df["label"].isna().any() or (df["label"].astype(int) < 0).any():
+        raise ValueError("Cannot save split CSV with NaN or negative labels.")
+    if df["class_name"].isna().any() or (df["class_name"].astype(str).str.len() == 0).any():
+        raise ValueError("Cannot save split CSV with empty class_name values.")
+    if df["class_key"].isna().any() or (df["class_key"].astype(str).str.len() == 0).any():
+        raise ValueError("Cannot save split CSV with empty class_key values.")
+
     df.to_csv(path, index=False)
 
 
@@ -89,44 +233,56 @@ def save_split_csv(df: pd.DataFrame, path: str | Path) -> None:
 # Split creation
 # =========================================================
 
-def get_class_key(class_info) -> str:
-    return getattr(class_info, "class_key", getattr(class_info, "key", ""))
-
-
-def get_class_name(class_info) -> str:
-    return getattr(class_info, "class_name", getattr(class_info, "name", ""))
-
-
-def get_class_label(class_info) -> int:
-    return int(getattr(class_info, "label", getattr(class_info, "label_index", -1)))
-
 def build_metadata_dataframe(source_root: str | Path = RAW_DIR) -> pd.DataFrame:
+    """
+    Képlistát készít a kiválasztott adatgyökérből.
+
+    Fontos: ez nem csak RAW_DIR-re használható. Ha a lung_masked vagy lung_crop
+    variant ugyanazokat az osztálymappákat tartalmazza, akkor azokhoz is jó:
+        create_splits(source_root=LUNG_MASKED_DIR, ...)
+
+    A legtöbb esetben elég egyszer, RAW_DIR alapján splitet készíteni, és a
+    többi variant ugyanazokat a relative_path értékeket használja.
+    """
     source_root = Path(source_root)
 
     if not source_root.exists():
         raise RuntimeError(f"[ERROR] Dataset root does not exist: {source_root}")
 
-    rows: list[dict] = []
+    class_info_df = validate_class_infos()
+    rows: list[dict[str, Any]] = []
+
+    print("[INFO] CLASS_INFOS mapping:")
+    print(class_info_df[["label", "class_key", "class_name", "raw_dir"]].to_string(index=False))
 
     for class_info in CLASS_INFOS:
-        raw_dir_name = Path(class_info.raw_dir).name
+        raw_dir = get_class_raw_dir(class_info)
+        raw_dir_name = raw_dir.name
         class_dir = source_root / raw_dir_name
 
         if not class_dir.exists():
             raise RuntimeError(
-                f"[ERROR] Missing class directory: {class_dir}"
+                f"[ERROR] Missing class directory: {class_dir}\n"
+                f"source_root={source_root}\n"
+                f"raw_dir from CLASS_INFOS={raw_dir}"
             )
 
         files = list_images(class_dir)
+        if len(files) == 0:
+            raise RuntimeError(f"[ERROR] No images found in class directory: {class_dir}")
+
+        class_key = get_class_key(class_info)
+        class_name = get_class_name(class_info)
+        label = get_class_label(class_info)
 
         for path in files:
             rows.append(
                 {
                     "relative_path": str(path.relative_to(source_root)),
                     "filename": path.name,
-                    "class_key": get_class_key(class_info),
-                    "class_name": get_class_name(class_info),
-                    "label": get_class_label(class_info),
+                    "class_key": class_key,
+                    "class_name": class_name,
+                    "label": label,
                 }
             )
 
@@ -136,7 +292,17 @@ def build_metadata_dataframe(source_root: str | Path = RAW_DIR) -> pd.DataFrame:
         raise RuntimeError(f"[ERROR] No images found under: {source_root}")
 
     df = df[SPLIT_COLUMNS].copy()
+
+    # Kemény validáció: itt már soha nem engedünk -1/nan értéket tovább.
+    if df["label"].isna().any() or (df["label"].astype(int) < 0).any():
+        raise RuntimeError("[ERROR] Invalid labels generated in metadata dataframe.")
+    if df["class_name"].isna().any() or (df["class_name"].astype(str).str.len() == 0).any():
+        raise RuntimeError("[ERROR] Empty class_name generated in metadata dataframe.")
+    if df["class_key"].isna().any() or (df["class_key"].astype(str).str.len() == 0).any():
+        raise RuntimeError("[ERROR] Empty class_key generated in metadata dataframe.")
+
     return df
+
 
 def create_splits(
     source_root: str | Path = RAW_DIR,
@@ -148,9 +314,15 @@ def create_splits(
     overwrite: bool = True,
 ) -> dict[str, pd.DataFrame]:
     """
-    Creates train.csv / val.csv / test.csv with unified columns:
+    Létrehozza a train.csv / val.csv / test.csv fájlokat egységes oszlopokkal:
 
         relative_path, filename, class_key, class_name, label
+
+    Raw variant esetén tipikusan:
+        create_splits(source_root=RAW_DIR, split_dir=SPLITS_DIR)
+
+    Ha minden data_variant ugyanazt a mappaszerkezetet használja, akkor a raw
+    alapján készült split újrahasználható lung_masked/lung_crop esetén is.
     """
     split_dir = Path(split_dir)
     ensure_dir(split_dir)
@@ -204,10 +376,12 @@ def create_splits(
     save_split_csv(val_df, val_csv)
     save_split_csv(test_df, test_csv)
 
-    print("[OK] Created split CSV files:")
+    print("\n[OK] Created split CSV files:")
     print("train:", train_csv, len(train_df))
     print("val  :", val_csv, len(val_df))
     print("test :", test_csv, len(test_df))
+
+    print_split_summary(split_dir)
 
     return {
         "train": train_df,
@@ -305,6 +479,9 @@ def build_dataset_from_dataframe(
         num_parallel_calls=AUTOTUNE,
     )
 
+    # Cache szándékosan az augmentáció ELŐTT van.
+    # Így a dekódolt/átméretezett képeket cache-eljük, de az augmentáció
+    # minden epochban újra random lehet.
     if cache:
         ds = ds.cache()
 
