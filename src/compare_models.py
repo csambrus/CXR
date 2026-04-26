@@ -2,10 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Iterable
+import hashlib
 import json
+
 
 import matplotlib.pyplot as plt
 import pandas as pd
+
+try:
+    from IPython.display import Image as IPyImage, display
+except Exception:  # notebookon kívül is működjön
+    IPyImage = None
+    display = None
 
 from src.config import (
     MODELS_DIR,
@@ -45,6 +53,212 @@ def _safe_float(x):
         return float(x)
     except Exception:
         return None
+
+
+def _display_png(path: str | Path) -> None:
+    """PNG megjelenítése notebookban, ha IPython környezetben fut."""
+    if display is None or IPyImage is None:
+        return
+
+    path = Path(path)
+    if path.exists():
+        display(IPyImage(filename=str(path)))
+
+
+def _save_show_close(fig, save_path: str | Path | None = None, show: bool = False) -> None:
+    """Egységes save + notebook inline display + close kezelés."""
+    if save_path is not None:
+        save_path = Path(save_path)
+        fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
+
+    if show:
+        # Notebookban a friss matplotlib ábra is bekerül az outputba.
+        plt.show()
+        # Biztos megjelenítés akkor is, ha backend vagy Colab furcsán viselkedik.
+        if save_path is not None:
+            _display_png(save_path)
+    else:
+        plt.close(fig)
+
+
+def _hash_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def split_fingerprint(split_dir: str | Path) -> dict[str, Any]:
+    """
+    A split állapotának stabil ujjlenyomata.
+    Ha a train/val/test CSV tartalma változik, a hash is változik.
+    """
+    split_dir = Path(split_dir)
+    files = ["train.csv", "val.csv", "test.csv"]
+
+    items: dict[str, Any] = {}
+    h = hashlib.sha256()
+
+    for name in files:
+        path = split_dir / name
+        if not path.exists():
+            raise FileNotFoundError(f"Missing split file: {path}")
+
+        file_hash = _hash_file(path)
+        stat = path.stat()
+
+        items[name] = {
+            "path": str(path),
+            "size": int(stat.st_size),
+            "sha256": file_hash,
+        }
+
+        h.update(name.encode("utf-8"))
+        h.update(file_hash.encode("utf-8"))
+
+    return {
+        "split_dir": str(split_dir),
+        "files": items,
+        "sha256": h.hexdigest(),
+    }
+
+
+def _candidate_model_dirs(out_dir: str | Path, model_name: str, data_variant: str) -> list[Path]:
+    out_dir = Path(out_dir)
+    return [
+        out_dir / data_variant / model_name,
+        out_dir / model_name / data_variant,
+        out_dir / f"{model_name}_{data_variant}",
+        out_dir / model_name,
+    ]
+
+
+def _candidate_model_paths(model_dir: Path) -> list[Path]:
+    return [
+        model_dir / "best_model.keras",
+        model_dir / "final_model.keras",
+        model_dir / "model.keras",
+    ]
+
+
+def _read_json_if_exists(path: str | Path) -> dict[str, Any] | None:
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[WARN] JSON nem olvasható: {path} | {e}")
+        return None
+
+
+def _write_run_metadata(model_dir: str | Path, metadata: dict[str, Any]) -> None:
+    model_dir = ensure_dir(model_dir)
+    save_json(metadata, Path(model_dir) / "run_metadata.json")
+
+
+def _find_existing_run(
+    *,
+    model_name: str,
+    data_variant: str,
+    split_dir: str | Path,
+    out_dir: str | Path,
+    trust_existing_without_fingerprint: bool = True,
+) -> dict[str, Any] | None:
+    """
+    Megkeresi a már kész modellt + metrics.json-t.
+    Ha van run_metadata.json és split hash, csak egyező split esetén fogadja el.
+    Régebbi futásoknál, ahol még nincs hash, opcionálisan elfogadható a meglévő eredmény.
+    """
+    current_fp = split_fingerprint(split_dir)
+    current_hash = current_fp["sha256"]
+
+    for model_dir in _candidate_model_dirs(out_dir, model_name, data_variant):
+        model_path = next((p for p in _candidate_model_paths(model_dir) if p.exists()), None)
+        metrics_path = model_dir / "metrics.json"
+        metadata_path = model_dir / "run_metadata.json"
+
+        if model_path is None or not metrics_path.exists():
+            continue
+
+        metrics_json = _read_json_if_exists(metrics_path)
+        if metrics_json is None:
+            continue
+
+        metadata = _read_json_if_exists(metadata_path) or {}
+        stored_hash = (
+            metadata.get("split_fingerprint", {}).get("sha256")
+            or metrics_json.get("split_fingerprint", {}).get("sha256")
+        )
+
+        if stored_hash is not None and stored_hash != current_hash:
+            print(
+                f"[INFO] Existing result ignored because split changed: "
+                f"{model_name}/{data_variant}"
+            )
+            continue
+
+        if stored_hash is None and not trust_existing_without_fingerprint:
+            print(
+                f"[INFO] Existing result has no split fingerprint, rerun required: "
+                f"{model_name}/{data_variant}"
+            )
+            continue
+
+        if stored_hash is None:
+            print(
+                f"[WARN] Existing result has no split fingerprint, but it will be reused: "
+                f"{model_name}/{data_variant}"
+            )
+
+        metrics = metrics_json.get("metrics", metrics_json)
+
+        eval_summary = {
+            "model_name": metrics_json.get("model_name", model_name),
+            "data_variant": metrics_json.get("data_variant", data_variant),
+            "model_path": str(metrics_json.get("model_path", model_path)),
+            "out_dir": str(metrics_json.get("out_dir", model_dir)),
+            "data_root": metrics_json.get("data_root"),
+            "metrics": metrics,
+            "split_fingerprint": current_fp,
+            "reused_existing": True,
+        }
+
+        train_summary = {
+            "model_name": model_name,
+            "data_variant": data_variant,
+            "best_model_path": str(model_path),
+            "out_dir": str(model_dir),
+            "data_root": metrics_json.get("data_root"),
+            "split_fingerprint": current_fp,
+            "reused_existing": True,
+        }
+
+        # Régi futásnál utólag is elmentjük a fingerprintet, hogy legközelebb már ellenőrizhető legyen.
+        if stored_hash is None:
+            _write_run_metadata(
+                model_dir,
+                {
+                    "model_name": model_name,
+                    "data_variant": data_variant,
+                    "split_fingerprint": current_fp,
+                    "model_path": str(model_path),
+                    "metrics_path": str(metrics_path),
+                    "reused_existing_without_previous_fingerprint": True,
+                },
+            )
+
+        return {
+            "train_summary": train_summary,
+            "eval_summary": eval_summary,
+        }
+
+    return None
 
 
 def _model_variant_label(model: str, variant: str) -> str:
@@ -129,6 +343,7 @@ def plot_metric_bars(
     metric: str,
     save_path: str | Path | None = None,
     title: str | None = None,
+    show: bool = False,
 ):
     if metric not in comparison_df.columns:
         raise ValueError(f"Metric '{metric}' not found in comparison dataframe.")
@@ -148,10 +363,7 @@ def plot_metric_bars(
 
     fig.tight_layout()
 
-    if save_path is not None:
-        fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
-
-    plt.close(fig)
+    _save_show_close(fig, save_path=save_path, show=show)
 
 
 def plot_metric_by_variant(
@@ -159,6 +371,7 @@ def plot_metric_by_variant(
     metric: str,
     save_path: str | Path | None = None,
     title: str | None = None,
+    show: bool = False,
 ):
     if metric not in comparison_df.columns:
         raise ValueError(f"Metric '{metric}' not found in comparison dataframe.")
@@ -180,16 +393,14 @@ def plot_metric_by_variant(
 
     fig.tight_layout()
 
-    if save_path is not None:
-        fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
-
-    plt.close(fig)
+    _save_show_close(fig, save_path=save_path, show=show)
 
 
 def plot_models_within_each_variant(
     comparison_df: pd.DataFrame,
     out_dir: str | Path,
     metrics: Iterable[str] | None = None,
+    show: bool = False,
 ):
     out_dir = ensure_dir(Path(out_dir) / "models_within_variants")
 
@@ -218,8 +429,7 @@ def plot_models_within_each_variant(
 
             fig.tight_layout()
             save_path = out_dir / f"{variant}_{metric}.png"
-            fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
-            plt.close(fig)
+            _save_show_close(fig, save_path=save_path, show=show)
 
             print(f"[INFO] Saved: {save_path}")
 
@@ -228,6 +438,7 @@ def plot_variants_within_each_model(
     comparison_df: pd.DataFrame,
     out_dir: str | Path,
     metrics: Iterable[str] | None = None,
+    show: bool = False,
 ):
     out_dir = ensure_dir(Path(out_dir) / "variants_within_models")
 
@@ -256,8 +467,7 @@ def plot_variants_within_each_model(
 
             fig.tight_layout()
             save_path = out_dir / f"{model}_{metric}.png"
-            fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
-            plt.close(fig)
+            _save_show_close(fig, save_path=save_path, show=show)
 
             print(f"[INFO] Saved: {save_path}")
 
@@ -266,6 +476,7 @@ def plot_metric_heatmaps(
     comparison_df: pd.DataFrame,
     out_dir: str | Path,
     metrics: Iterable[str] | None = None,
+    show: bool = False,
 ):
     out_dir = ensure_dir(Path(out_dir) / "heatmaps")
 
@@ -304,8 +515,7 @@ def plot_metric_heatmaps(
         fig.tight_layout()
 
         save_path = out_dir / f"heatmap_{metric}.png"
-        fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
-        plt.close(fig)
+        _save_show_close(fig, save_path=save_path, show=show)
 
         print(f"[INFO] Saved: {save_path}")
 
@@ -313,6 +523,7 @@ def plot_metric_heatmaps(
 def plot_all_main_metrics(
     comparison_df: pd.DataFrame,
     out_dir: str | Path,
+    show: bool = False,
 ):
     out_dir = ensure_dir(out_dir)
 
@@ -333,6 +544,7 @@ def plot_all_main_metrics(
             metric=metric,
             save_path=Path(out_dir) / f"bar_{metric}.png",
             title=f"Comparison - {metric}",
+            show=show,
         )
 
         plot_metric_by_variant(
@@ -340,11 +552,12 @@ def plot_all_main_metrics(
             metric=metric,
             save_path=Path(out_dir) / f"grouped_{metric}.png",
             title=f"{metric} by model / variant",
+            show=show,
         )
 
-    plot_models_within_each_variant(comparison_df, out_dir)
-    plot_variants_within_each_model(comparison_df, out_dir)
-    plot_metric_heatmaps(comparison_df, out_dir)
+    plot_models_within_each_variant(comparison_df, out_dir, show=show)
+    plot_variants_within_each_model(comparison_df, out_dir, show=show)
+    plot_metric_heatmaps(comparison_df, out_dir, show=show)
 
 
 # =========================================================
@@ -354,6 +567,7 @@ def plot_all_main_metrics(
 def plot_training_history_for_row(
     row: pd.Series,
     out_dir: str | Path,
+    show: bool = False,
 ):
     model = str(row["model"])
     variant = str(row["data_variant"])
@@ -398,8 +612,7 @@ def plot_training_history_for_row(
         fig.tight_layout()
 
         save_path = out_dir / f"{model}_{variant}_{train_metric}.png"
-        fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
-        plt.close(fig)
+        _save_show_close(fig, save_path=save_path, show=show)
 
         print(f"[INFO] Saved: {save_path}")
 
@@ -407,15 +620,17 @@ def plot_training_history_for_row(
 def plot_all_training_histories(
     comparison_df: pd.DataFrame,
     out_dir: str | Path,
+    show: bool = False,
 ):
     for _, row in comparison_df.iterrows():
-        plot_training_history_for_row(row, out_dir=out_dir)
+        plot_training_history_for_row(row, out_dir=out_dir, show=show)
 
 
 def plot_history_comparison_by_variant(
     comparison_df: pd.DataFrame,
     out_dir: str | Path,
     metric: str = "val_accuracy",
+    show: bool = False,
 ):
     out_dir = ensure_dir(Path(out_dir) / "epoch_comparison_by_variant")
 
@@ -449,8 +664,7 @@ def plot_history_comparison_by_variant(
         fig.tight_layout()
 
         save_path = out_dir / f"{variant}_{metric}.png"
-        fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
-        plt.close(fig)
+        _save_show_close(fig, save_path=save_path, show=show)
 
         print(f"[INFO] Saved: {save_path}")
 
@@ -459,6 +673,7 @@ def plot_history_comparison_by_model(
     comparison_df: pd.DataFrame,
     out_dir: str | Path,
     metric: str = "val_accuracy",
+    show: bool = False,
 ):
     out_dir = ensure_dir(Path(out_dir) / "epoch_comparison_by_model")
 
@@ -492,8 +707,7 @@ def plot_history_comparison_by_model(
         fig.tight_layout()
 
         save_path = out_dir / f"{model}_{metric}.png"
-        fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
-        plt.close(fig)
+        _save_show_close(fig, save_path=save_path, show=show)
 
         print(f"[INFO] Saved: {save_path}")
 
@@ -501,10 +715,11 @@ def plot_history_comparison_by_model(
 def plot_epoch_comparisons(
     comparison_df: pd.DataFrame,
     out_dir: str | Path,
+    show: bool = False,
 ):
     for metric in ["val_accuracy", "val_loss", "accuracy", "loss"]:
-        plot_history_comparison_by_variant(comparison_df, out_dir, metric=metric)
-        plot_history_comparison_by_model(comparison_df, out_dir, metric=metric)
+        plot_history_comparison_by_variant(comparison_df, out_dir, metric=metric, show=show)
+        plot_history_comparison_by_model(comparison_df, out_dir, metric=metric, show=show)
 
 
 # =========================================================
@@ -516,6 +731,7 @@ def compare_existing_results(
     out_dir: str | Path = MODELS_DIR,
     comparison_name: str = "comparison",
     make_plots: bool = True,
+    show_plots: bool = True,
 ) -> pd.DataFrame:
     out_dir = ensure_dir(Path(out_dir) / comparison_name)
 
@@ -577,9 +793,9 @@ def compare_existing_results(
     leaderboard_df.to_csv(out_dir / "leaderboard.csv", index=False)
 
     if make_plots:
-        plot_all_main_metrics(comparison_df, out_dir)
-        plot_all_training_histories(comparison_df, out_dir)
-        plot_epoch_comparisons(comparison_df, out_dir)
+        plot_all_main_metrics(comparison_df, out_dir, show=show_plots)
+        plot_all_training_histories(comparison_df, out_dir, show=show_plots)
+        plot_epoch_comparisons(comparison_df, out_dir, show=show_plots)
 
     return comparison_df
 
@@ -597,6 +813,9 @@ def run_multiple_models(
     learning_rate_finetune: float = 1e-5,
     comparison_name: str = "comparison",
     make_plots: bool = True,
+    show_plots: bool = True,
+    skip_if_complete: bool = True,
+    trust_existing_without_fingerprint: bool = True,
 ) -> pd.DataFrame:
     model_names = _normalize_model_names(model_names)
     data_variants = _normalize_variants(data_variants)
@@ -617,32 +836,92 @@ def run_multiple_models(
             print(f"Running model={model_name} | data_variant={data_variant}")
             print("-" * 72)
 
-            train_summary = run_training(
-                split_dir=split_dir,
-                out_dir=out_dir,
-                model_name=model_name,
-                pretrained=pretrained,
-                do_fine_tuning=do_fine_tuning,
-                epochs_head=epochs_head,
-                epochs_finetune=epochs_finetune,
-                learning_rate_head=learning_rate_head,
-                learning_rate_finetune=learning_rate_finetune,
-                data_variant=data_variant,
-            )
+            existing_result = None
+            if skip_if_complete:
+                existing_result = _find_existing_run(
+                    model_name=model_name,
+                    data_variant=data_variant,
+                    split_dir=split_dir,
+                    out_dir=out_dir,
+                    trust_existing_without_fingerprint=trust_existing_without_fingerprint,
+                )
 
-            eval_summary = run_evaluation(
-                model_path=train_summary["best_model_path"],
-                split_dir=split_dir,
-                out_dir=out_dir,
-                model_name=model_name,
-                data_variant=data_variant,
-            )
+            if existing_result is not None:
+                print(f"[SKIP] Már kész, újrafuttatás kihagyva: {model_name} / {data_variant}")
+                result_item = existing_result
+            else:
+                current_fp = split_fingerprint(split_dir)
 
-            all_results.append(
-                {
+                train_summary = run_training(
+                    split_dir=split_dir,
+                    out_dir=out_dir,
+                    model_name=model_name,
+                    pretrained=pretrained,
+                    do_fine_tuning=do_fine_tuning,
+                    epochs_head=epochs_head,
+                    epochs_finetune=epochs_finetune,
+                    learning_rate_head=learning_rate_head,
+                    learning_rate_finetune=learning_rate_finetune,
+                    data_variant=data_variant,
+                )
+
+                eval_summary = run_evaluation(
+                    model_path=train_summary["best_model_path"],
+                    split_dir=split_dir,
+                    out_dir=out_dir,
+                    model_name=model_name,
+                    data_variant=data_variant,
+                )
+
+                model_dir = Path(eval_summary.get("out_dir", Path(train_summary["best_model_path"]).parent))
+                metadata = {
+                    "model_name": model_name,
+                    "data_variant": data_variant,
+                    "split_fingerprint": current_fp,
+                    "training": {
+                        "pretrained": pretrained,
+                        "do_fine_tuning": do_fine_tuning,
+                        "epochs_head": epochs_head,
+                        "epochs_finetune": epochs_finetune,
+                        "learning_rate_head": learning_rate_head,
+                        "learning_rate_finetune": learning_rate_finetune,
+                    },
+                    "model_path": train_summary.get("best_model_path"),
+                    "eval_out_dir": eval_summary.get("out_dir"),
+                }
+                _write_run_metadata(model_dir, metadata)
+
+                train_summary["split_fingerprint"] = current_fp
+                eval_summary["split_fingerprint"] = current_fp
+
+                result_item = {
                     "train_summary": train_summary,
                     "eval_summary": eval_summary,
                 }
+
+            all_results.append(result_item)
+
+            # Futásonként azonnal jelenjenek meg az epoch-görbék is a notebookban.
+            tmp_metrics = result_item.get("eval_summary", {}).get("metrics", {})
+            tmp_train = result_item.get("train_summary", {})
+            tmp_eval = result_item.get("eval_summary", {})
+            tmp_row = pd.Series(
+                {
+                    "model": model_name,
+                    "data_variant": data_variant,
+                    "model_path": tmp_eval.get("model_path", tmp_train.get("best_model_path")),
+                    "out_dir": tmp_eval.get("out_dir", tmp_train.get("out_dir")),
+                    "accuracy": _safe_float(tmp_metrics.get("accuracy")),
+                    "recall_macro": _safe_float(tmp_metrics.get("recall_macro")),
+                    "f1_macro": _safe_float(tmp_metrics.get("f1_macro")),
+                    "roc_auc_macro_ovr": _safe_float(tmp_metrics.get("roc_auc_macro_ovr")),
+                    "loss": _safe_float(tmp_metrics.get("loss")),
+                }
+            )
+            plot_training_history_for_row(
+                tmp_row,
+                out_dir=Path(out_dir) / comparison_name,
+                show=show_plots,
             )
 
     comparison_df = compare_existing_results(
@@ -650,6 +929,7 @@ def run_multiple_models(
         out_dir=out_dir,
         comparison_name=comparison_name,
         make_plots=make_plots,
+        show_plots=show_plots,
     )
 
     return comparison_df
@@ -664,6 +944,7 @@ def load_metrics_from_model_dirs(
     out_dir: str | Path = MODELS_DIR,
     comparison_name: str = "comparison_loaded",
     make_plots: bool = True,
+    show_plots: bool = True,
 ) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
 
@@ -729,9 +1010,9 @@ def load_metrics_from_model_dirs(
     comparison_df[leaderboard_cols].to_csv(out_dir / "leaderboard.csv", index=False)
 
     if make_plots:
-        plot_all_main_metrics(comparison_df, out_dir)
-        plot_all_training_histories(comparison_df, out_dir)
-        plot_epoch_comparisons(comparison_df, out_dir)
+        plot_all_main_metrics(comparison_df, out_dir, show=show_plots)
+        plot_all_training_histories(comparison_df, out_dir, show=show_plots)
+        plot_epoch_comparisons(comparison_df, out_dir, show=show_plots)
 
     return comparison_df
 
@@ -740,6 +1021,7 @@ def load_metrics_from_comparison_csv(
     comparison_csv: str | Path,
     out_dir: str | Path = OUTPUT_DIR / "model_comparison_loaded",
     make_plots: bool = True,
+    show_plots: bool = True,
 ) -> pd.DataFrame:
     comparison_csv = Path(comparison_csv)
     comparison_df = pd.read_csv(comparison_csv)
@@ -756,9 +1038,9 @@ def load_metrics_from_comparison_csv(
     comparison_df.to_csv(out_dir / "comparison.csv", index=False)
 
     if make_plots:
-        plot_all_main_metrics(comparison_df, out_dir)
-        plot_all_training_histories(comparison_df, out_dir)
-        plot_epoch_comparisons(comparison_df, out_dir)
+        plot_all_main_metrics(comparison_df, out_dir, show=show_plots)
+        plot_all_training_histories(comparison_df, out_dir, show=show_plots)
+        plot_epoch_comparisons(comparison_df, out_dir, show=show_plots)
 
     return comparison_df
 
