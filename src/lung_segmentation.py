@@ -546,6 +546,180 @@ def build_unet(input_shape: tuple[int, int, int] = (224, 224, 1)) -> tf.keras.Mo
     return tf.keras.Model(inputs, outputs, name="lung_unet")
 
 
+
+
+# =========================================================
+# Training cache / plotting helpers
+# =========================================================
+
+def _json_safe(obj):
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, Path):
+        return str(obj)
+    return obj
+
+
+def _file_signature(path: str | Path) -> dict[str, Any]:
+    path = Path(path)
+    if not path.exists():
+        return {"path": str(path), "exists": False}
+    return {
+        "path": str(path),
+        "exists": True,
+        "size": int(path.stat().st_size),
+        "mtime": float(path.stat().st_mtime),
+    }
+
+
+def get_segmentation_split_fingerprint() -> dict[str, Any]:
+    return {
+        "train_csv": _file_signature(SEGMENTATION_SPLITS_DIR / "train.csv"),
+        "val_csv": _file_signature(SEGMENTATION_SPLITS_DIR / "val.csv"),
+        "test_csv": _file_signature(SEGMENTATION_SPLITS_DIR / "test.csv"),
+    }
+
+
+def _load_json_if_exists(path: str | Path) -> dict[str, Any] | None:
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[WARN] Nem sikerült JSON-t olvasni: {path} | {e}")
+        return None
+
+
+def _load_segmentation_history(out_dir: str | Path = SEG_MODEL_DIR) -> dict[str, list[float]] | None:
+    out_dir = Path(out_dir)
+    history_json = out_dir / "history.json"
+    history_csv = out_dir / "history.csv"
+
+    if history_json.exists():
+        data = _load_json_if_exists(history_json)
+        if isinstance(data, dict):
+            return data
+
+    if history_csv.exists():
+        try:
+            df = pd.read_csv(history_csv)
+            return {c: df[c].dropna().tolist() for c in df.columns if c != "epoch"}
+        except Exception as e:
+            print(f"[WARN] Nem sikerült history.csv-t olvasni: {history_csv} | {e}")
+
+    return None
+
+
+def _segmentation_run_is_reusable(
+    out_dir: str | Path,
+    epochs: int,
+    learning_rate: float,
+    batch_size: int,
+    split_fingerprint: dict[str, Any],
+) -> bool:
+    out_dir = Path(out_dir)
+    metadata_path = out_dir / "run_metadata.json"
+    model_path = out_dir / "best_model.keras"
+    history_path = out_dir / "history.csv"
+
+    if not model_path.exists() or not history_path.exists() or not metadata_path.exists():
+        return False
+
+    metadata = _load_json_if_exists(metadata_path)
+    if not metadata:
+        return False
+
+    expected = {
+        "epochs": int(epochs),
+        "learning_rate": float(learning_rate),
+        "batch_size": int(batch_size),
+        "image_size": list(IMAGE_SIZE),
+        "split_fingerprint": split_fingerprint,
+    }
+
+    for key, value in expected.items():
+        if metadata.get(key) != value:
+            return False
+
+    return True
+
+
+def _history_to_dataframe(history: dict[str, list[float]] | pd.DataFrame) -> pd.DataFrame:
+    if isinstance(history, pd.DataFrame):
+        df = history.copy()
+    else:
+        df = pd.DataFrame(history)
+
+    if "epoch" not in df.columns:
+        df.insert(0, "epoch", range(1, len(df) + 1))
+
+    return df
+
+
+def plot_segmentation_epoch_curves(
+    history: dict[str, list[float]] | pd.DataFrame | None = None,
+    out_dir: str | Path = SEG_MODEL_DIR,
+    show: bool = True,
+) -> list[Path]:
+    out_dir = ensure_dir(out_dir)
+
+    if history is None:
+        history = _load_segmentation_history(out_dir)
+
+    if history is None:
+        print(f"[WARN] Nincs training history itt: {out_dir}")
+        return []
+
+    df = _history_to_dataframe(history)
+    saved_paths: list[Path] = []
+
+    metric_pairs = [
+        ("loss", "val_loss", "Loss"),
+        ("dice_coef", "val_dice_coef", "Dice"),
+        ("iou_coef", "val_iou_coef", "IoU"),
+    ]
+
+    curves_dir = ensure_dir(Path(out_dir) / "training_curves")
+
+    for train_metric, val_metric, title in metric_pairs:
+        if train_metric not in df.columns and val_metric not in df.columns:
+            continue
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+        if train_metric in df.columns:
+            ax.plot(df["epoch"], df[train_metric], marker="o", label=train_metric)
+
+        if val_metric in df.columns:
+            ax.plot(df["epoch"], df[val_metric], marker="o", label=val_metric)
+
+        ax.set_title(f"Lung segmentation - {title}")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel(title)
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+
+        save_path = curves_dir / f"epoch_{train_metric}.png"
+        fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
+        saved_paths.append(save_path)
+        print(f"[INFO] Saved: {save_path}")
+
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+    return saved_paths
+
 # =========================================================
 # Training
 # =========================================================
@@ -554,7 +728,56 @@ def train_segmentation(
     epochs: int = 20,
     learning_rate: float = 1e-3,
     batch_size: int = BATCH_SIZE,
+    overwrite: bool = False,
+    force_retrain: bool = False,
+    show_plots: bool = True,
 ) -> dict[str, list[float]]:
+    """
+    Trains the lung U-Net only if needed.
+
+    Skips retraining when best_model.keras, history.csv and run_metadata.json exist,
+    and the train/val/test split fingerprint plus core training parameters are unchanged.
+    Saved epoch plots are also shown inline in notebooks when show_plots=True.
+    """
+    set_seed(SEED)
+
+    out_dir = ensure_dir(SEG_MODEL_DIR)
+    split_fingerprint = get_segmentation_split_fingerprint()
+
+    can_reuse = _segmentation_run_is_reusable(
+        out_dir=out_dir,
+        epochs=epochs,
+        learning_rate=learning_rate,
+        batch_size=batch_size,
+        split_fingerprint=split_fingerprint,
+    )
+
+    if can_reuse and not overwrite and not force_retrain:
+        print("=" * 72)
+        print("[SKIP] Lung segmentation training already exists and split is unchanged.")
+        print("=" * 72)
+        print("model_dir      :", out_dir)
+        print("best_model     :", out_dir / "best_model.keras")
+        print("history        :", out_dir / "history.csv")
+        print("run_metadata   :", out_dir / "run_metadata.json")
+        print("=" * 72)
+
+        history_dict = _load_segmentation_history(out_dir)
+        if history_dict is None:
+            history_dict = {}
+
+        plot_segmentation_epoch_curves(
+            history=history_dict,
+            out_dir=out_dir,
+            show=show_plots,
+        )
+        return history_dict
+
+    if overwrite or force_retrain:
+        print("[INFO] Újratanítás kényszerítve: overwrite/force_retrain=True")
+    else:
+        print("[INFO] Nem találtam újrahasználható segmentation futást, tanítás indul.")
+
     train_ds = build_dataset("train", batch_size=batch_size)
     val_ds = build_dataset("val", batch_size=batch_size)
 
@@ -565,8 +788,6 @@ def train_segmentation(
         loss=bce_dice_loss,
         metrics=[dice_coef, iou_coef],
     )
-
-    out_dir = ensure_dir(SEG_MODEL_DIR)
 
     callbacks = [
         tf.keras.callbacks.ModelCheckpoint(
@@ -603,8 +824,29 @@ def train_segmentation(
 
     model.save(out_dir / "last_model.keras")
 
-    history_dict = history.history
+    history_dict = _json_safe(history.history)
     save_json(history_dict, out_dir / "history.json")
+
+    metadata = {
+        "epochs": int(epochs),
+        "learning_rate": float(learning_rate),
+        "batch_size": int(batch_size),
+        "image_size": list(IMAGE_SIZE),
+        "seed": int(SEED),
+        "split_fingerprint": split_fingerprint,
+        "best_model_path": str(out_dir / "best_model.keras"),
+        "last_model_path": str(out_dir / "last_model.keras"),
+        "history_csv": str(out_dir / "history.csv"),
+        "history_json": str(out_dir / "history.json"),
+        "trained_at_unix": time.time(),
+    }
+    save_json(_json_safe(metadata), out_dir / "run_metadata.json")
+
+    plot_segmentation_epoch_curves(
+        history=history_dict,
+        out_dir=out_dir,
+        show=show_plots,
+    )
 
     return history_dict
 
@@ -643,36 +885,47 @@ def evaluate_segmentation(batch_size: int = BATCH_SIZE) -> dict[str, float]:
 # Visualization
 # =========================================================
 
-def plot_training_history():
-    history_csv = SEG_MODEL_DIR / "history.csv"
+def plot_training_history(
+    show: bool = True,
+    save: bool = True,
+    out_dir: str | Path = SEG_MODEL_DIR,
+) -> Path | None:
+    """
+    Backward-compatible combined history plot.
+    Saves PNG and displays it inline in notebooks by default.
+    """
+    out_dir = ensure_dir(out_dir)
+    history_csv = Path(out_dir) / "history.csv"
     if not history_csv.exists():
         raise RuntimeError(f"[ERROR] Missing history file: {history_csv}")
 
     df = pd.read_csv(history_csv)
+    if "epoch" not in df.columns:
+        df.insert(0, "epoch", range(1, len(df) + 1))
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4))
 
-    axes[0].plot(df["loss"], label="train")
+    axes[0].plot(df["epoch"], df["loss"], label="train")
     if "val_loss" in df.columns:
-        axes[0].plot(df["val_loss"], label="val")
+        axes[0].plot(df["epoch"], df["val_loss"], label="val")
     axes[0].set_title("Loss")
     axes[0].set_xlabel("Epoch")
     axes[0].grid(True, alpha=0.3)
     axes[0].legend()
 
     if "dice_coef" in df.columns:
-        axes[1].plot(df["dice_coef"], label="train")
+        axes[1].plot(df["epoch"], df["dice_coef"], label="train")
     if "val_dice_coef" in df.columns:
-        axes[1].plot(df["val_dice_coef"], label="val")
+        axes[1].plot(df["epoch"], df["val_dice_coef"], label="val")
     axes[1].set_title("Dice")
     axes[1].set_xlabel("Epoch")
     axes[1].grid(True, alpha=0.3)
     axes[1].legend()
 
     if "iou_coef" in df.columns:
-        axes[2].plot(df["iou_coef"], label="train")
+        axes[2].plot(df["epoch"], df["iou_coef"], label="train")
     if "val_iou_coef" in df.columns:
-        axes[2].plot(df["val_iou_coef"], label="val")
+        axes[2].plot(df["epoch"], df["val_iou_coef"], label="val")
     axes[2].set_title("IoU")
     axes[2].set_xlabel("Epoch")
     axes[2].grid(True, alpha=0.3)
@@ -680,12 +933,31 @@ def plot_training_history():
 
     fig.suptitle("Lung segmentation training history")
     fig.tight_layout()
-    fig.savefig(SEG_MODEL_DIR / "training_history.png", dpi=PLOT_DPI, bbox_inches="tight")
-    plt.show()
 
+    save_path = Path(out_dir) / "training_history.png"
+    if save:
+        fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
+        print(f"[INFO] Saved: {save_path}")
 
-def plot_predictions(n: int = 6):
-    model_path = SEG_MODEL_DIR / "best_model.keras"
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return save_path if save else None
+
+def plot_predictions(
+    n: int = 6,
+    show: bool = True,
+    save: bool = True,
+    out_dir: str | Path = SEG_MODEL_DIR,
+) -> Path | None:
+    """
+    Plots test image / true mask / predicted mask examples.
+    Saves PNG and displays it inline in notebooks by default.
+    """
+    out_dir = ensure_dir(out_dir)
+    model_path = Path(out_dir) / "best_model.keras"
     if not model_path.exists():
         raise RuntimeError(f"[ERROR] Missing trained model: {model_path}")
 
@@ -720,9 +992,20 @@ def plot_predictions(n: int = 6):
         for j in range(3):
             axes[i, j].axis("off")
 
-    plt.tight_layout()
-    plt.show()
+    fig.suptitle("Lung segmentation predictions")
+    fig.tight_layout()
 
+    save_path = Path(out_dir) / "prediction_examples.png"
+    if save:
+        fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
+        print(f"[INFO] Saved: {save_path}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return save_path if save else None
 
 # =========================================================
 # Inference on classifier dataset
@@ -937,6 +1220,9 @@ def run_full_segmentation_pipeline(
     batch_size: int = BATCH_SIZE,
     threshold: float = 0.5,
     crop_margin: int = 10,
+    overwrite_training: bool = False,
+    force_retrain: bool = False,
+    show_plots: bool = True,
 ) -> dict[str, Any]:
     prepare_segmentation_dataset()
     split_summary = create_splits(overwrite=True)
@@ -945,16 +1231,19 @@ def run_full_segmentation_pipeline(
         epochs=epochs,
         learning_rate=learning_rate,
         batch_size=batch_size,
+        overwrite=overwrite_training,
+        force_retrain=force_retrain,
+        show_plots=show_plots,
     )
     test_metrics = evaluate_segmentation(batch_size=batch_size)
 
     try:
-        plot_training_history()
+        plot_training_history(show=show_plots)
     except Exception as e:
         print("[WARN] plot_training_history failed:", e)
 
     try:
-        plot_predictions()
+        plot_predictions(show=show_plots)
     except Exception as e:
         print("[WARN] plot_predictions failed:", e)
 
