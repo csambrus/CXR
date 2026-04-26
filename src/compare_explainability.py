@@ -22,21 +22,14 @@ from src.config import (
     ensure_dir,
 )
 
-# A variant könyvtárak nem minden régebbi configban léteztek, de az új
-# projektstruktúrában ezek kellenek a raw / lung_masked / lung_crop kezeléshez.
 try:
     from src.config import LUNG_MASKED_DIR, LUNG_CROP_DIR
-except Exception:  # pragma: no cover - csak config-kompatibilitási védelem
+except Exception:
     LUNG_MASKED_DIR = Path(RAW_DIR).parent / "lung_masked"
     LUNG_CROP_DIR = Path(RAW_DIR).parent / "lung_crop"
 
 from src.dataloader import build_datasets_from_split_csvs, read_split_csv
-from src.explainability import (
-    make_gradcam_heatmap,
-    resize_heatmap_to_image,
-    overlay_heatmap_on_image,
-    find_last_conv_layer_name,
-)
+from src.explainability import resize_heatmap_to_image, overlay_heatmap_on_image
 
 
 # =========================================================
@@ -63,15 +56,6 @@ def _safe_get_class_name(label: int) -> str:
 
 
 def _resolve_data_root(data_variant: str) -> Path:
-    """
-    Az új dataloader API data_root paramétert vár, nem data_variant-et.
-
-    A split CSV-k relative_path értékei közösek maradnak, csak a gyökérkönyvtár
-    változik:
-        raw         -> RAW_DIR
-        lung_masked -> LUNG_MASKED_DIR
-        lung_crop   -> LUNG_CROP_DIR
-    """
     variant = str(data_variant).lower()
 
     if variant == "raw":
@@ -93,18 +77,20 @@ def _find_model_path(model_name: str, data_variant: str | None = None) -> Path:
     if data_variant is not None:
         candidates.extend(
             [
-                Path(MODELS_DIR) / data_variant / model_name / "best_model.keras",
-                Path(MODELS_DIR) / data_variant / model_name / "final_model.keras",
-                Path(MODELS_DIR) / model_name / data_variant / "best_model.keras",
-                Path(MODELS_DIR) / model_name / data_variant / "final_model.keras",
                 Path(MODELS_DIR) / f"{model_name}_{data_variant}" / "best_model.keras",
+                Path(MODELS_DIR) / f"{model_name}_{data_variant}" / "last_model.keras",
                 Path(MODELS_DIR) / f"{model_name}_{data_variant}" / "final_model.keras",
+                Path(MODELS_DIR) / data_variant / model_name / "best_model.keras",
+                Path(MODELS_DIR) / data_variant / model_name / "last_model.keras",
+                Path(MODELS_DIR) / model_name / data_variant / "best_model.keras",
+                Path(MODELS_DIR) / model_name / data_variant / "last_model.keras",
             ]
         )
 
     candidates.extend(
         [
             Path(MODELS_DIR) / model_name / "best_model.keras",
+            Path(MODELS_DIR) / model_name / "last_model.keras",
             Path(MODELS_DIR) / model_name / "final_model.keras",
         ]
     )
@@ -119,20 +105,10 @@ def _find_model_path(model_name: str, data_variant: str | None = None) -> Path:
     )
 
 
-def load_model_by_name(model_name: str, data_variant: str | None = None):
-    model_path = _find_model_path(model_name, data_variant=data_variant)
-
-    model = tf.keras.models.load_model(model_path, safe_mode=False)
-    last_conv = find_last_conv_layer_name(model)
-
-    return model, last_conv, model_path
-
-
 def _build_test_dataset(split_dir: str | Path, data_variant: str):
     """
-    Csak az új dataloader API-t kezeli.
-
-    build_datasets_from_split_csvs(...) -> train_ds, val_ds, test_ds
+    Csak az új dataloader API-t kezeli:
+        build_datasets_from_split_csvs(...) -> train_ds, val_ds, test_ds
     A test_df-et külön olvassuk a test.csv-ből.
     """
     split_dir = Path(split_dir)
@@ -144,6 +120,7 @@ def _build_test_dataset(split_dir: str | Path, data_variant: str):
         image_size=IMAGE_SIZE,
         batch_size=16,
         channels=1,
+        cache=False,
     )
 
     test_df = read_split_csv(split_dir / "test.csv")
@@ -152,10 +129,8 @@ def _build_test_dataset(split_dir: str | Path, data_variant: str):
 
 def _ensure_channel_last(img: np.ndarray) -> np.ndarray:
     img = np.asarray(img)
-
     if img.ndim == 2:
         img = img[..., np.newaxis]
-
     return img
 
 
@@ -171,14 +146,12 @@ def _load_gray_image(
     with Image.open(path) as img:
         img = img.convert("L")
         if image_size is not None:
-            # PIL size: (width, height), IMAGE_SIZE: (height, width)
             img = img.resize((int(image_size[1]), int(image_size[0])))
         arr = np.asarray(img)
 
     arr = arr.astype(np.float32)
     if normalize:
         arr = arr / 255.0
-
     return arr[..., np.newaxis]
 
 
@@ -190,22 +163,16 @@ def _imshow_gray(ax, img, title: str):
 
 
 def _display_saved_image(path: str | Path) -> None:
-    """Megjeleníti a már létező PNG-t notebookban, ha IPython elérhető."""
     try:
         from IPython.display import Image as IPyImage, display
-
         display(IPyImage(filename=str(path)))
     except Exception:
-        # Scriptből futtatva ne legyen hiba csak azért, mert nincs notebook display.
         pass
 
 
 def _path_from_split_row(row: pd.Series, root_dir: str | Path) -> Path:
     if "relative_path" not in row:
-        raise ValueError(
-            "A test.csv-ben nincs relative_path oszlop. "
-            "Az új dataloader split formátuma ezt megköveteli."
-        )
+        raise ValueError("A test.csv-ben nincs relative_path oszlop.")
     return Path(root_dir) / str(row["relative_path"])
 
 
@@ -217,6 +184,151 @@ def _output_stem_from_row(row: pd.Series, idx: int) -> str:
     if "filename" in row:
         return Path(str(row["filename"])).stem
     return f"example_{idx:04d}"
+
+
+# =========================================================
+# Robust Grad-CAM for nested transfer models
+# =========================================================
+
+def _layer_output_rank(layer: tf.keras.layers.Layer) -> int | None:
+    try:
+        shape = layer.output.shape
+        return len(shape) if shape is not None else None
+    except Exception:
+        return None
+
+
+def _find_last_4d_layer_name(model: tf.keras.Model) -> str:
+    for layer in reversed(model.layers):
+        if _layer_output_rank(layer) == 4:
+            return layer.name
+    raise ValueError(f"Nem találtam 4D Grad-CAM célréteget ebben a modellben: {model.name}")
+
+
+def find_gradcam_target(model: tf.keras.Model) -> dict[str, str]:
+    """
+    Transfer learning modelleknél a backbone gyakran beágyazott Functional modell
+    az outer modelben. Ilyenkor a cél nem maga a 'resnet50'/'vgg16' layer, hanem
+    annak belső utolsó 4D feature map rétege.
+    """
+    for layer in reversed(model.layers):
+        if isinstance(layer, tf.keras.Model):
+            try:
+                if _layer_output_rank(layer) == 4:
+                    return {
+                        "mode": "nested",
+                        "base_layer_name": layer.name,
+                        "inner_layer_name": _find_last_4d_layer_name(layer),
+                    }
+            except Exception:
+                pass
+
+        if _layer_output_rank(layer) == 4:
+            return {"mode": "outer", "layer_name": layer.name}
+
+    raise ValueError("Nem találtam Grad-CAM-kompatibilis 4D réteget a modellben.")
+
+
+def _format_gradcam_target(target: dict[str, str]) -> str:
+    if target.get("mode") == "nested":
+        return f"{target['base_layer_name']} / {target['inner_layer_name']}"
+    return str(target.get("layer_name"))
+
+
+def _call_layer_safely(layer: tf.keras.layers.Layer, x: tf.Tensor) -> tf.Tensor:
+    if isinstance(layer, tf.keras.layers.InputLayer):
+        return x
+    if isinstance(layer, tf.keras.layers.Concatenate):
+        return layer([x, x, x])
+    try:
+        return layer(x, training=False)
+    except TypeError:
+        return layer(x)
+
+
+def make_gradcam_heatmap_robust(
+    model: tf.keras.Model,
+    image_tensor: tf.Tensor,
+    gradcam_target: dict[str, str],
+    pred_index: int | None = None,
+) -> np.ndarray:
+    image_tensor = tf.cast(image_tensor, tf.float32)
+
+    if gradcam_target.get("mode") == "outer":
+        target_layer = model.get_layer(gradcam_target["layer_name"])
+        grad_model = tf.keras.models.Model(
+            inputs=model.inputs,
+            outputs=[target_layer.output, model.output],
+        )
+
+        with tf.GradientTape() as tape:
+            conv_outputs, preds = grad_model(image_tensor, training=False)
+            if pred_index is None:
+                pred_index = int(tf.argmax(preds[0]))
+            class_channel = preds[:, pred_index]
+
+        grads = tape.gradient(class_channel, conv_outputs)
+
+    elif gradcam_target.get("mode") == "nested":
+        base_layer_name = gradcam_target["base_layer_name"]
+        inner_layer_name = gradcam_target["inner_layer_name"]
+        base_model = model.get_layer(base_layer_name)
+        inner_layer = base_model.get_layer(inner_layer_name)
+
+        base_grad_model = tf.keras.models.Model(
+            inputs=base_model.inputs,
+            outputs=[inner_layer.output, base_model.output],
+        )
+
+        with tf.GradientTape() as tape:
+            x = image_tensor
+            conv_outputs = None
+            passed_base = False
+
+            for layer in model.layers:
+                if isinstance(layer, tf.keras.layers.InputLayer):
+                    continue
+
+                if layer.name == base_layer_name:
+                    conv_outputs, x = base_grad_model(x, training=False)
+                    passed_base = True
+                else:
+                    x = _call_layer_safely(layer, x)
+
+            if not passed_base or conv_outputs is None:
+                raise RuntimeError(f"Nem sikerült elérni a beágyazott backbone-t: {base_layer_name}")
+
+            preds = x
+            if pred_index is None:
+                pred_index = int(tf.argmax(preds[0]))
+            class_channel = preds[:, pred_index]
+
+        grads = tape.gradient(class_channel, conv_outputs)
+
+    else:
+        raise ValueError(f"Ismeretlen Grad-CAM target mód: {gradcam_target}")
+
+    if grads is None:
+        return np.zeros(tuple(image_tensor.shape[1:3]), dtype=np.float32)
+
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+    conv_outputs = conv_outputs[0]
+    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
+    heatmap = tf.maximum(heatmap, 0)
+
+    max_val = tf.reduce_max(heatmap)
+    if float(max_val) > 0:
+        heatmap = heatmap / max_val
+
+    return heatmap.numpy().astype(np.float32)
+
+
+def load_model_by_name(model_name: str, data_variant: str | None = None):
+    model_path = _find_model_path(model_name, data_variant=data_variant)
+    model = tf.keras.models.load_model(model_path, safe_mode=False)
+    gradcam_target = find_gradcam_target(model)
+    return model, gradcam_target, model_path
 
 
 # =========================================================
@@ -233,14 +345,11 @@ def make_saliency_map(
     with tf.GradientTape() as tape:
         tape.watch(input_tensor)
         preds = model(input_tensor, training=False)
-
         if pred_index is None:
             pred_index = int(tf.argmax(preds[0]))
-
         class_score = preds[:, pred_index]
 
     grads = tape.gradient(class_score, input_tensor)
-
     if grads is None:
         saliency = np.zeros(input_tensor.shape[1:3], dtype=np.float32)
     else:
@@ -248,11 +357,9 @@ def make_saliency_map(
 
     saliency = saliency.astype(np.float32)
     saliency -= saliency.min()
-
     denom = saliency.max()
     if denom > 0:
         saliency /= denom
-
     return saliency
 
 
@@ -271,7 +378,6 @@ def _select_examples(
     for images, labels in test_ds:
         probs = ref_model.predict(images, verbose=0)
         preds = np.argmax(probs, axis=1)
-
         y_true.extend(labels.numpy().tolist())
         y_pred.extend(preds.tolist())
 
@@ -286,7 +392,6 @@ def _select_examples(
 
     if len(correct_idx) > 0:
         selected.extend(correct_idx[:half].tolist())
-
     if len(incorrect_idx) > 0:
         selected.extend(incorrect_idx[:half].tolist())
 
@@ -297,9 +402,7 @@ def _select_examples(
             if len(selected) >= n_examples:
                 break
 
-    selected = selected[:n_examples]
-
-    return y_true, y_pred, selected
+    return selected[:n_examples]
 
 
 # =========================================================
@@ -316,21 +419,12 @@ def run_compare_explainability(
     show: bool = True,
     skip_existing: bool = False,
 ) -> dict[str, Any]:
-    """
-    Grad-CAM + saliency összehasonlítás több modellre és több data variantra.
-
-    Fontos: ez a verzió már csak az új dataloader API-t támogatja:
-        build_datasets_from_split_csvs(...) -> train_ds, val_ds, test_ds
-
-    A PNG-ket menti, és show=True esetén notebookban is megjeleníti.
-    """
     model_names = _normalize_model_names(model_names)
     data_variants = _normalize_variants(data_variants)
     split_dir = Path(split_dir)
 
     if out_dir is None:
         out_dir = Path(OUTPUT_DIR) / "figures" / "compare_explainability"
-
     out_dir = ensure_dir(out_dir)
 
     print("=" * 80)
@@ -360,48 +454,32 @@ def run_compare_explainability(
         variant_out_dir = ensure_dir(Path(out_dir) / data_variant)
         data_root = _resolve_data_root(data_variant)
 
-        # -------------------------------------------------
-        # dataset
-        # -------------------------------------------------
         test_ds, test_df = _build_test_dataset(
             split_dir=split_dir,
             data_variant=data_variant,
         )
 
-        # -------------------------------------------------
-        # models
-        # -------------------------------------------------
         models: dict[str, dict[str, Any]] = {}
         for name in model_names:
-            model, last_conv, model_path = load_model_by_name(
-                name,
-                data_variant=data_variant,
-            )
+            model, gradcam_target, model_path = load_model_by_name(name, data_variant=data_variant)
             models[name] = {
                 "model": model,
-                "last_conv": last_conv,
+                "gradcam_target": gradcam_target,
                 "model_path": model_path,
             }
             print(f"[INFO] Loaded {name}: {model_path}")
-            print(f"[INFO] Last conv {name}: {last_conv}")
+            print(f"[INFO] Grad-CAM target {name}: {_format_gradcam_target(gradcam_target)}")
 
         ref_name = model_names[0]
-        ref_model = models[ref_name]["model"]
-
         y_true, y_pred, selected = _select_examples(
             test_ds=test_ds,
-            ref_model=ref_model,
+            ref_model=models[ref_name]["model"],
             n_examples=n_examples,
         )
-
         print(f"[INFO] Selected examples: {len(selected)}")
 
-        # -------------------------------------------------
-        # visualization
-        # -------------------------------------------------
         for i, idx in enumerate(selected):
             row = test_df.iloc[idx]
-
             raw_path = _path_from_split_row(row, RAW_DIR)
             processed_path = _path_from_split_row(row, data_root)
 
@@ -413,27 +491,16 @@ def run_compare_explainability(
                 print(f"[SKIP] Existing: {save_path}")
                 if show:
                     _display_saved_image(save_path)
-                summary["items"].append(
-                    {
-                        "data_variant": data_variant,
-                        "index": int(idx),
-                        "path": str(save_path),
-                        "skipped": True,
-                    }
-                )
+                summary["items"].append({"data_variant": data_variant, "index": int(idx), "path": str(save_path), "skipped": True})
                 continue
 
             raw = _load_gray_image(raw_path, image_size=IMAGE_SIZE, normalize=True)
             proc = _load_gray_image(processed_path, image_size=IMAGE_SIZE, normalize=True)
-
             input_tensor = tf.convert_to_tensor(proc[np.newaxis, ...], dtype=tf.float32)
             true_label = int(y_true[idx])
 
-            # Egy minta egy sorban:
-            # raw | processed | model1 Grad-CAM | model1 saliency | model2 ...
             model_cols = 2 if include_saliency else 1
             ncols = 2 + len(models) * model_cols
-
             fig, axes = plt.subplots(1, ncols, figsize=(4 * ncols, 4))
             axes = np.ravel(axes)
 
@@ -445,7 +512,7 @@ def run_compare_explainability(
 
             for name, info in models.items():
                 model = info["model"]
-                last_conv = info["last_conv"]
+                gradcam_target = info["gradcam_target"]
 
                 probs = model.predict(input_tensor, verbose=0)
                 pred = int(np.argmax(probs))
@@ -460,13 +527,12 @@ def run_compare_explainability(
                     }
                 )
 
-                heatmap_small = make_gradcam_heatmap(
-                    model,
-                    input_tensor,
-                    last_conv_layer_name=last_conv,
+                heatmap_small = make_gradcam_heatmap_robust(
+                    model=model,
+                    image_tensor=input_tensor,
+                    gradcam_target=gradcam_target,
                     pred_index=pred,
                 )
-
                 heatmap = resize_heatmap_to_image(heatmap_small, IMAGE_SIZE)
                 overlay = overlay_heatmap_on_image(proc, heatmap)
 
@@ -484,7 +550,6 @@ def run_compare_explainability(
                         input_tensor=input_tensor,
                         pred_index=pred,
                     )
-
                     axes[col].imshow(saliency, cmap="gray")
                     axes[col].set_title(
                         f"{name} saliency\nP: {_safe_get_class_name(pred)} ({conf:.2f})",
@@ -497,7 +562,6 @@ def run_compare_explainability(
                 f"Variant: {data_variant} | True: {_safe_get_class_name(true_label)} | file: {Path(processed_path).name}",
                 fontsize=11,
             )
-
             fig.tight_layout()
             fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
 
@@ -507,7 +571,6 @@ def run_compare_explainability(
                 plt.close(fig)
 
             print(f"[INFO] Saved: {save_path}")
-
             summary["items"].append(
                 {
                     "data_variant": data_variant,
@@ -525,7 +588,6 @@ def run_compare_explainability(
     print("=" * 80)
     print("DONE")
     print("=" * 80)
-
     return summary
 
 
@@ -559,7 +621,6 @@ def run_compare_explainability_from_comparison_df(
         raise ValueError("comparison_df must contain f1_macro or accuracy column.")
 
     best_rows = []
-
     for variant, sub in comparison_df.groupby("data_variant"):
         best = sub.sort_values(sort_metric, ascending=False).iloc[0]
         best_rows.append(best)
