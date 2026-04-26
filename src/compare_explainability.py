@@ -3,25 +3,35 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Any
 
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import tensorflow as tf
+from PIL import Image
 
 from src.config import (
     IMAGE_SIZE,
     MODELS_DIR,
     OUTPUT_DIR,
     SPLITS_DIR,
+    RAW_DIR,
     PLOT_DPI,
     get_class_name,
     ensure_dir,
 )
-from src.dataloader import build_datasets_from_split_csvs
+
+# A variant könyvtárak nem minden régebbi configban léteztek, de az új
+# projektstruktúrában ezek kellenek a raw / lung_masked / lung_crop kezeléshez.
+try:
+    from src.config import LUNG_MASKED_DIR, LUNG_CROP_DIR
+except Exception:  # pragma: no cover - csak config-kompatibilitási védelem
+    LUNG_MASKED_DIR = Path(RAW_DIR).parent / "lung_masked"
+    LUNG_CROP_DIR = Path(RAW_DIR).parent / "lung_crop"
+
+from src.dataloader import build_datasets_from_split_csvs, read_split_csv
 from src.explainability import (
-    load_raw_image,
-    load_processed_input,
     make_gradcam_heatmap,
     resize_heatmap_to_image,
     overlay_heatmap_on_image,
@@ -50,6 +60,31 @@ def _safe_get_class_name(label: int) -> str:
         return get_class_name(int(label))
     except Exception:
         return str(label)
+
+
+def _resolve_data_root(data_variant: str) -> Path:
+    """
+    Az új dataloader API data_root paramétert vár, nem data_variant-et.
+
+    A split CSV-k relative_path értékei közösek maradnak, csak a gyökérkönyvtár
+    változik:
+        raw         -> RAW_DIR
+        lung_masked -> LUNG_MASKED_DIR
+        lung_crop   -> LUNG_CROP_DIR
+    """
+    variant = str(data_variant).lower()
+
+    if variant == "raw":
+        return Path(RAW_DIR)
+    if variant == "lung_masked":
+        return Path(LUNG_MASKED_DIR)
+    if variant == "lung_crop":
+        return Path(LUNG_CROP_DIR)
+
+    raise ValueError(
+        f"Unknown data_variant: {data_variant!r}. "
+        "Supported values: raw, lung_masked, lung_crop."
+    )
 
 
 def _find_model_path(model_name: str, data_variant: str | None = None) -> Path:
@@ -94,26 +129,25 @@ def load_model_by_name(model_name: str, data_variant: str | None = None):
 
 
 def _build_test_dataset(split_dir: str | Path, data_variant: str):
-    try:
-        return build_datasets_from_split_csvs(
-            split_dir=split_dir,
-            image_size=IMAGE_SIZE,
-            batch_size=16,
-            data_variant=data_variant,
-        )
-    except TypeError:
-        return build_datasets_from_split_csvs(
-            split_dir=split_dir,
-            image_size=IMAGE_SIZE,
-            batch_size=16,
-        )
+    """
+    Csak az új dataloader API-t kezeli.
 
+    build_datasets_from_split_csvs(...) -> train_ds, val_ds, test_ds
+    A test_df-et külön olvassuk a test.csv-ből.
+    """
+    split_dir = Path(split_dir)
+    data_root = _resolve_data_root(data_variant)
 
-def _load_processed(filepath: str | Path, data_variant: str | None = None):
-    try:
-        return load_processed_input(filepath, data_variant=data_variant)
-    except TypeError:
-        return load_processed_input(filepath)
+    _, _, test_ds = build_datasets_from_split_csvs(
+        split_dir=split_dir,
+        data_root=data_root,
+        image_size=IMAGE_SIZE,
+        batch_size=16,
+        channels=1,
+    )
+
+    test_df = read_split_csv(split_dir / "test.csv")
+    return test_ds, test_df
 
 
 def _ensure_channel_last(img: np.ndarray) -> np.ndarray:
@@ -124,6 +158,70 @@ def _ensure_channel_last(img: np.ndarray) -> np.ndarray:
 
     return img
 
+
+def _load_gray_image(
+    path: str | Path,
+    image_size: tuple[int, int] | None = None,
+    normalize: bool = True,
+) -> np.ndarray:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Missing image file: {path}")
+
+    with Image.open(path) as img:
+        img = img.convert("L")
+        if image_size is not None:
+            # PIL size: (width, height), IMAGE_SIZE: (height, width)
+            img = img.resize((int(image_size[1]), int(image_size[0])))
+        arr = np.asarray(img)
+
+    arr = arr.astype(np.float32)
+    if normalize:
+        arr = arr / 255.0
+
+    return arr[..., np.newaxis]
+
+
+def _imshow_gray(ax, img, title: str):
+    img = _ensure_channel_last(img)
+    ax.imshow(img[..., 0], cmap="gray")
+    ax.set_title(title, fontsize=9)
+    ax.axis("off")
+
+
+def _display_saved_image(path: str | Path) -> None:
+    """Megjeleníti a már létező PNG-t notebookban, ha IPython elérhető."""
+    try:
+        from IPython.display import Image as IPyImage, display
+
+        display(IPyImage(filename=str(path)))
+    except Exception:
+        # Scriptből futtatva ne legyen hiba csak azért, mert nincs notebook display.
+        pass
+
+
+def _path_from_split_row(row: pd.Series, root_dir: str | Path) -> Path:
+    if "relative_path" not in row:
+        raise ValueError(
+            "A test.csv-ben nincs relative_path oszlop. "
+            "Az új dataloader split formátuma ezt megköveteli."
+        )
+    return Path(root_dir) / str(row["relative_path"])
+
+
+def _output_stem_from_row(row: pd.Series, idx: int) -> str:
+    if "relative_path" in row:
+        rel = str(row["relative_path"])
+        safe = rel.replace("/", "__").replace("\\", "__")
+        return Path(safe).stem
+    if "filename" in row:
+        return Path(str(row["filename"])).stem
+    return f"example_{idx:04d}"
+
+
+# =========================================================
+# Saliency
+# =========================================================
 
 def make_saliency_map(
     model: tf.keras.Model,
@@ -158,6 +256,10 @@ def make_saliency_map(
     return saliency
 
 
+# =========================================================
+# Example selection
+# =========================================================
+
 def _select_examples(
     test_ds,
     ref_model: tf.keras.Model,
@@ -170,8 +272,8 @@ def _select_examples(
         probs = ref_model.predict(images, verbose=0)
         preds = np.argmax(probs, axis=1)
 
-        y_true.extend(labels.numpy())
-        y_pred.extend(preds)
+        y_true.extend(labels.numpy().tolist())
+        y_pred.extend(preds.tolist())
 
     y_true = np.array(y_true)
     y_pred = np.array(y_pred)
@@ -180,7 +282,6 @@ def _select_examples(
     incorrect_idx = np.where(y_true != y_pred)[0]
 
     selected: list[int] = []
-
     half = max(1, n_examples // 2)
 
     if len(correct_idx) > 0:
@@ -190,8 +291,7 @@ def _select_examples(
         selected.extend(incorrect_idx[:half].tolist())
 
     if len(selected) < n_examples:
-        all_idx = list(range(len(y_true)))
-        for idx in all_idx:
+        for idx in range(len(y_true)):
             if idx not in selected:
                 selected.append(idx)
             if len(selected) >= n_examples:
@@ -200,13 +300,6 @@ def _select_examples(
     selected = selected[:n_examples]
 
     return y_true, y_pred, selected
-
-
-def _imshow_gray(ax, img, title: str):
-    img = _ensure_channel_last(img)
-    ax.imshow(img[..., 0], cmap="gray")
-    ax.set_title(title, fontsize=9)
-    ax.axis("off")
 
 
 # =========================================================
@@ -221,9 +314,19 @@ def run_compare_explainability(
     n_examples: int = 6,
     include_saliency: bool = True,
     show: bool = True,
-):
+    skip_existing: bool = False,
+) -> dict[str, Any]:
+    """
+    Grad-CAM + saliency összehasonlítás több modellre és több data variantra.
+
+    Fontos: ez a verzió már csak az új dataloader API-t támogatja:
+        build_datasets_from_split_csvs(...) -> train_ds, val_ds, test_ds
+
+    A PNG-ket menti, és show=True esetén notebookban is megjeleníti.
+    """
     model_names = _normalize_model_names(model_names)
     data_variants = _normalize_variants(data_variants)
+    split_dir = Path(split_dir)
 
     if out_dir is None:
         out_dir = Path(OUTPUT_DIR) / "figures" / "compare_explainability"
@@ -235,8 +338,19 @@ def run_compare_explainability(
     print("=" * 80)
     print("model_names  :", model_names)
     print("data_variants:", data_variants)
+    print("split_dir    :", split_dir)
     print("out_dir      :", out_dir)
+    print("show         :", show)
+    print("skip_existing:", skip_existing)
     print("=" * 80)
+
+    summary: dict[str, Any] = {
+        "out_dir": str(out_dir),
+        "split_dir": str(split_dir),
+        "model_names": model_names,
+        "data_variants": data_variants,
+        "items": [],
+    }
 
     for data_variant in data_variants:
         print("\n" + "=" * 80)
@@ -244,11 +358,12 @@ def run_compare_explainability(
         print("=" * 80)
 
         variant_out_dir = ensure_dir(Path(out_dir) / data_variant)
+        data_root = _resolve_data_root(data_variant)
 
         # -------------------------------------------------
         # dataset
         # -------------------------------------------------
-        _, _, test_ds, _, _, test_df = _build_test_dataset(
+        test_ds, test_df = _build_test_dataset(
             split_dir=split_dir,
             data_variant=data_variant,
         )
@@ -256,7 +371,7 @@ def run_compare_explainability(
         # -------------------------------------------------
         # models
         # -------------------------------------------------
-        models = {}
+        models: dict[str, dict[str, Any]] = {}
         for name in model_names:
             model, last_conv, model_path = load_model_by_name(
                 name,
@@ -286,31 +401,47 @@ def run_compare_explainability(
         # -------------------------------------------------
         for i, idx in enumerate(selected):
             row = test_df.iloc[idx]
-            filepath = row["filepath"]
 
-            raw = load_raw_image(filepath)
-            proc = _load_processed(filepath, data_variant=data_variant)
+            raw_path = _path_from_split_row(row, RAW_DIR)
+            processed_path = _path_from_split_row(row, data_root)
 
-            raw = _ensure_channel_last(raw)
-            proc = _ensure_channel_last(proc)
+            stem = _output_stem_from_row(row, idx)
+            suffix = "gradcam_saliency" if include_saliency else "gradcam"
+            save_path = variant_out_dir / f"{i:02d}_{stem}_{suffix}.png"
+
+            if skip_existing and save_path.exists():
+                print(f"[SKIP] Existing: {save_path}")
+                if show:
+                    _display_saved_image(save_path)
+                summary["items"].append(
+                    {
+                        "data_variant": data_variant,
+                        "index": int(idx),
+                        "path": str(save_path),
+                        "skipped": True,
+                    }
+                )
+                continue
+
+            raw = _load_gray_image(raw_path, image_size=IMAGE_SIZE, normalize=True)
+            proc = _load_gray_image(processed_path, image_size=IMAGE_SIZE, normalize=True)
 
             input_tensor = tf.convert_to_tensor(proc[np.newaxis, ...], dtype=tf.float32)
-
             true_label = int(y_true[idx])
 
-            # layout:
-            # raw | processed | model1 Grad-CAM | model1 saliency | ...
+            # Egy minta egy sorban:
+            # raw | processed | model1 Grad-CAM | model1 saliency | model2 ...
             model_cols = 2 if include_saliency else 1
             ncols = 2 + len(models) * model_cols
 
             fig, axes = plt.subplots(1, ncols, figsize=(4 * ncols, 4))
-            if ncols == 1:
-                axes = [axes]
+            axes = np.ravel(axes)
 
             _imshow_gray(axes[0], raw, "Raw")
-            _imshow_gray(axes[1], proc, "Processed")
+            _imshow_gray(axes[1], proc, f"Processed\n{data_variant}")
 
             col = 2
+            prediction_rows: list[dict[str, Any]] = []
 
             for name, info in models.items():
                 model = info["model"]
@@ -319,6 +450,15 @@ def run_compare_explainability(
                 probs = model.predict(input_tensor, verbose=0)
                 pred = int(np.argmax(probs))
                 conf = float(np.max(probs))
+
+                prediction_rows.append(
+                    {
+                        "model": name,
+                        "pred": pred,
+                        "pred_name": _safe_get_class_name(pred),
+                        "confidence": conf,
+                    }
+                )
 
                 heatmap_small = make_gradcam_heatmap(
                     model,
@@ -354,14 +494,12 @@ def run_compare_explainability(
                     col += 1
 
             fig.suptitle(
-                f"Variant: {data_variant} | True: {_safe_get_class_name(true_label)} | file: {Path(filepath).name}",
+                f"Variant: {data_variant} | True: {_safe_get_class_name(true_label)} | file: {Path(processed_path).name}",
                 fontsize=11,
             )
 
-            plt.tight_layout()
-
-            save_path = variant_out_dir / f"{i:02d}_{Path(filepath).stem}_gradcam_saliency.png"
-            plt.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
+            fig.tight_layout()
+            fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
 
             if show:
                 plt.show()
@@ -370,9 +508,25 @@ def run_compare_explainability(
 
             print(f"[INFO] Saved: {save_path}")
 
+            summary["items"].append(
+                {
+                    "data_variant": data_variant,
+                    "index": int(idx),
+                    "raw_path": str(raw_path),
+                    "processed_path": str(processed_path),
+                    "path": str(save_path),
+                    "true_label": true_label,
+                    "true_name": _safe_get_class_name(true_label),
+                    "predictions": prediction_rows,
+                    "skipped": False,
+                }
+            )
+
     print("=" * 80)
     print("DONE")
     print("=" * 80)
+
+    return summary
 
 
 # =========================================================
@@ -386,6 +540,7 @@ def run_compare_explainability_from_comparison_df(
     n_examples: int = 6,
     include_saliency: bool = True,
     show: bool = True,
+    skip_existing: bool = False,
 ):
     if out_dir is None:
         out_dir = Path(OUTPUT_DIR) / "figures" / "compare_explainability_best"
@@ -419,7 +574,7 @@ def run_compare_explainability_from_comparison_df(
             f"{sort_metric}={row[sort_metric]:.4f}"
         )
 
-    run_compare_explainability(
+    return run_compare_explainability(
         model_names=best_models,
         data_variants=variants,
         split_dir=split_dir,
@@ -427,4 +582,5 @@ def run_compare_explainability_from_comparison_df(
         n_examples=n_examples,
         include_saliency=include_saliency,
         show=show,
+        skip_existing=skip_existing,
     )

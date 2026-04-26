@@ -5,7 +5,6 @@ from typing import Any, Iterable
 import hashlib
 import json
 
-
 import matplotlib.pyplot as plt
 import pandas as pd
 
@@ -69,14 +68,11 @@ def _save_show_close(fig, save_path: str | Path | None = None, show: bool = Fals
     """Egységes save + notebook inline display + close kezelés."""
     if save_path is not None:
         save_path = Path(save_path)
+        ensure_dir(save_path.parent)
         fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
 
     if show:
-        # Notebookban a friss matplotlib ábra is bekerül az outputba.
         plt.show()
-        # Biztos megjelenítés akkor is, ha backend vagy Colab furcsán viselkedik.
-        if save_path is not None:
-            _display_png(save_path)
     else:
         plt.close(fig)
 
@@ -130,9 +126,9 @@ def split_fingerprint(split_dir: str | Path) -> dict[str, Any]:
 def _candidate_model_dirs(out_dir: str | Path, model_name: str, data_variant: str) -> list[Path]:
     out_dir = Path(out_dir)
     return [
+        out_dir / f"{model_name}_{data_variant}",
         out_dir / data_variant / model_name,
         out_dir / model_name / data_variant,
-        out_dir / f"{model_name}_{data_variant}",
         out_dir / model_name,
     ]
 
@@ -141,6 +137,7 @@ def _candidate_model_paths(model_dir: Path) -> list[Path]:
     return [
         model_dir / "best_model.keras",
         model_dir / "final_model.keras",
+        model_dir / "last_model.keras",
         model_dir / "model.keras",
     ]
 
@@ -239,7 +236,6 @@ def _find_existing_run(
             "reused_existing": True,
         }
 
-        # Régi futásnál utólag is elmentjük a fingerprintet, hogy legközelebb már ellenőrizhető legyen.
         if stored_hash is None:
             _write_run_metadata(
                 model_dir,
@@ -268,6 +264,7 @@ def _model_variant_label(model: str, variant: str) -> str:
 def _candidate_history_paths(model_dir: Path) -> list[Path]:
     return [
         model_dir / "history.csv",
+        model_dir / "history_full.csv",
         model_dir / "training_history.csv",
         model_dir / "history.json",
         model_dir / "training_history.json",
@@ -301,7 +298,10 @@ def _read_history_file(path: Path) -> pd.DataFrame | None:
         return None
 
     if "epoch" not in df.columns:
-        df.insert(0, "epoch", range(1, len(df) + 1))
+        if "epoch_global" in df.columns:
+            df.insert(0, "epoch", df["epoch_global"].astype(int))
+        else:
+            df.insert(0, "epoch", range(1, len(df) + 1))
 
     return df
 
@@ -334,6 +334,29 @@ def _infer_model_dir(row: pd.Series) -> Path | None:
     return None
 
 
+def _find_metric_pair(hist: pd.DataFrame, base_names: list[str]) -> tuple[str | None, str | None, str]:
+    """
+    Megkeresi a train/val oszloppárt több lehetséges név alapján.
+    Példa: recall_macro / val_recall_macro vagy recall / val_recall.
+    """
+    for name in base_names:
+        train_col = name if name in hist.columns else None
+        val_col = f"val_{name}" if f"val_{name}" in hist.columns else None
+        if train_col is not None or val_col is not None:
+            return train_col, val_col, name
+    return None, None, base_names[0]
+
+
+def _evaluation_png_from_summary(result_item: dict[str, Any]) -> Path | None:
+    eval_summary = result_item.get("eval_summary", {})
+    eval_out_dir = eval_summary.get("out_dir")
+    if eval_out_dir is None:
+        return None
+
+    path = Path(eval_out_dir) / "evaluation_row.png"
+    return path if path.exists() else None
+
+
 # =========================================================
 # Plot helpers: summary metrics
 # =========================================================
@@ -362,7 +385,6 @@ def plot_metric_bars(
     plt.xticks(rotation=45, ha="right")
 
     fig.tight_layout()
-
     _save_show_close(fig, save_path=save_path, show=show)
 
 
@@ -376,11 +398,7 @@ def plot_metric_by_variant(
     if metric not in comparison_df.columns:
         raise ValueError(f"Metric '{metric}' not found in comparison dataframe.")
 
-    pivot_df = comparison_df.pivot(
-        index="model",
-        columns="data_variant",
-        values=metric,
-    )
+    pivot_df = comparison_df.pivot(index="model", columns="data_variant", values=metric)
 
     fig, ax = plt.subplots(figsize=(10, 5))
     pivot_df.plot(kind="bar", ax=ax)
@@ -392,7 +410,6 @@ def plot_metric_by_variant(
     ax.legend(title="data_variant")
 
     fig.tight_layout()
-
     _save_show_close(fig, save_path=save_path, show=show)
 
 
@@ -430,7 +447,6 @@ def plot_models_within_each_variant(
             fig.tight_layout()
             save_path = out_dir / f"{variant}_{metric}.png"
             _save_show_close(fig, save_path=save_path, show=show)
-
             print(f"[INFO] Saved: {save_path}")
 
 
@@ -468,7 +484,6 @@ def plot_variants_within_each_model(
             fig.tight_layout()
             save_path = out_dir / f"{model}_{metric}.png"
             _save_show_close(fig, save_path=save_path, show=show)
-
             print(f"[INFO] Saved: {save_path}")
 
 
@@ -487,11 +502,7 @@ def plot_metric_heatmaps(
         if metric not in comparison_df.columns:
             continue
 
-        pivot_df = comparison_df.pivot(
-            index="model",
-            columns="data_variant",
-            values=metric,
-        )
+        pivot_df = comparison_df.pivot(index="model", columns="data_variant", values=metric)
 
         fig, ax = plt.subplots(figsize=(8, 5))
         im = ax.imshow(pivot_df.values, aspect="auto")
@@ -516,7 +527,6 @@ def plot_metric_heatmaps(
 
         save_path = out_dir / f"heatmap_{metric}.png"
         _save_show_close(fig, save_path=save_path, show=show)
-
         print(f"[INFO] Saved: {save_path}")
 
 
@@ -527,13 +537,7 @@ def plot_all_main_metrics(
 ):
     out_dir = ensure_dir(out_dir)
 
-    metrics_to_plot = [
-        "accuracy",
-        "recall_macro",
-        "f1_macro",
-        "roc_auc_macro_ovr",
-        "loss",
-    ]
+    metrics_to_plot = ["accuracy", "recall_macro", "f1_macro", "roc_auc_macro_ovr", "loss"]
 
     for metric in metrics_to_plot:
         if metric not in comparison_df.columns:
@@ -568,53 +572,72 @@ def plot_training_history_for_row(
     row: pd.Series,
     out_dir: str | Path,
     show: bool = False,
-):
+) -> Path | None:
+    """
+    Egy futáshoz tartozó epoch-görbék egyetlen sorban:
+        loss | accuracy | recall_macro/recall | roc_auc_macro_ovr/auc
+    Csak az elérhető metrikák kerülnek rá.
+    """
     model = str(row["model"])
     variant = str(row["data_variant"])
     model_dir = _infer_model_dir(row)
 
     if model_dir is None:
         print(f"[WARN] Nem található model_dir: {model} / {variant}")
-        return
+        return None
 
     hist = find_training_history(model_dir)
     if hist is None:
         print(f"[WARN] Nincs training history: {model_dir}")
-        return
+        return None
 
     out_dir = ensure_dir(Path(out_dir) / "training_curves")
 
-    metric_pairs = [
-        ("loss", "val_loss"),
-        ("accuracy", "val_accuracy"),
-        ("recall", "val_recall"),
-        ("auc", "val_auc"),
-    ]
+    metric_specs: list[tuple[str | None, str | None, str, str]] = []
 
-    for train_metric, val_metric in metric_pairs:
-        if train_metric not in hist.columns and val_metric not in hist.columns:
-            continue
+    train_col, val_col, _ = _find_metric_pair(hist, ["loss"])
+    if train_col or val_col:
+        metric_specs.append((train_col, val_col, "Loss", "loss"))
 
-        fig, ax = plt.subplots(figsize=(8, 5))
+    train_col, val_col, _ = _find_metric_pair(hist, ["accuracy", "sparse_categorical_accuracy"])
+    if train_col or val_col:
+        metric_specs.append((train_col, val_col, "Accuracy", "accuracy"))
 
-        if train_metric in hist.columns:
+    train_col, val_col, _ = _find_metric_pair(hist, ["recall_macro", "macro_recall", "recall"])
+    if train_col or val_col:
+        metric_specs.append((train_col, val_col, "Macro recall", "recall_macro"))
+
+    train_col, val_col, _ = _find_metric_pair(hist, ["roc_auc_macro_ovr", "macro_auc", "auc"])
+    if train_col or val_col:
+        metric_specs.append((train_col, val_col, "Macro ROC-AUC", "roc_auc_macro_ovr"))
+
+    if len(metric_specs) == 0:
+        print(f"[WARN] Nincs rajzolható history metrika: {model_dir}")
+        return None
+
+    ncols = len(metric_specs)
+    fig, axes = plt.subplots(1, ncols, figsize=(5 * ncols, 4), squeeze=False)
+    axes = axes[0]
+
+    for ax, (train_metric, val_metric, title, _) in zip(axes, metric_specs):
+        if train_metric and train_metric in hist.columns:
             ax.plot(hist["epoch"], hist[train_metric], marker="o", label=train_metric)
 
-        if val_metric in hist.columns:
+        if val_metric and val_metric in hist.columns:
             ax.plot(hist["epoch"], hist[val_metric], marker="o", label=val_metric)
 
-        ax.set_title(f"Epochonkénti fejlődés\n{model} / {variant} / {train_metric}")
+        ax.set_title(title)
         ax.set_xlabel("Epoch")
-        ax.set_ylabel(train_metric)
         ax.grid(True, alpha=0.3)
-        ax.legend()
+        ax.legend(fontsize=8)
 
-        fig.tight_layout()
+    fig.suptitle(f"Training curves - {model} / {variant}")
+    fig.tight_layout()
 
-        save_path = out_dir / f"{model}_{variant}_{train_metric}.png"
-        _save_show_close(fig, save_path=save_path, show=show)
-
-        print(f"[INFO] Saved: {save_path}")
+    save_path = out_dir / f"{model}_{variant}_training_row.png"
+    _save_show_close(fig, save_path=save_path, show=show)
+    print(f"[INFO] Saved: {save_path}")
+    return save_path
 
 
 def plot_all_training_histories(
@@ -665,7 +688,6 @@ def plot_history_comparison_by_variant(
 
         save_path = out_dir / f"{variant}_{metric}.png"
         _save_show_close(fig, save_path=save_path, show=show)
-
         print(f"[INFO] Saved: {save_path}")
 
 
@@ -708,7 +730,6 @@ def plot_history_comparison_by_model(
 
         save_path = out_dir / f"{model}_{metric}.png"
         _save_show_close(fig, save_path=save_path, show=show)
-
         print(f"[INFO] Saved: {save_path}")
 
 
@@ -717,7 +738,16 @@ def plot_epoch_comparisons(
     out_dir: str | Path,
     show: bool = False,
 ):
-    for metric in ["val_accuracy", "val_loss", "accuracy", "loss"]:
+    for metric in [
+        "val_accuracy",
+        "val_recall_macro",
+        "val_roc_auc_macro_ovr",
+        "val_loss",
+        "accuracy",
+        "recall_macro",
+        "roc_auc_macro_ovr",
+        "loss",
+    ]:
         plot_history_comparison_by_variant(comparison_df, out_dir, metric=metric, show=show)
         plot_history_comparison_by_model(comparison_df, out_dir, metric=metric, show=show)
 
@@ -767,16 +797,10 @@ def compare_existing_results(
         raise ValueError("No results found to compare.")
 
     sort_cols = [c for c in ["f1_macro", "accuracy", "recall_macro"] if c in comparison_df.columns]
-    comparison_df = comparison_df.sort_values(
-        by=sort_cols,
-        ascending=False,
-    ).reset_index(drop=True)
+    comparison_df = comparison_df.sort_values(by=sort_cols, ascending=False).reset_index(drop=True)
 
     comparison_df.to_csv(out_dir / "comparison.csv", index=False)
-    save_json(
-        {"rows": comparison_df.to_dict(orient="records")},
-        out_dir / "comparison.json",
-    )
+    save_json({"rows": comparison_df.to_dict(orient="records")}, out_dir / "comparison.json")
 
     leaderboard_cols = [
         "model_variant",
@@ -814,6 +838,7 @@ def run_multiple_models(
     comparison_name: str = "comparison",
     make_plots: bool = True,
     show_plots: bool = True,
+    show_each_run: bool = True,
     skip_if_complete: bool = True,
     trust_existing_without_fingerprint: bool = True,
 ) -> pd.DataFrame:
@@ -828,6 +853,8 @@ def run_multiple_models(
     print("model_names   :", model_names)
     print("data_variants :", data_variants)
     print("comparison    :", comparison_name)
+    print("skip_if_complete:", skip_if_complete)
+    print("show_plots    :", show_plots)
     print("=" * 72)
 
     for model_name in model_names:
@@ -901,28 +928,38 @@ def run_multiple_models(
 
             all_results.append(result_item)
 
-            # Futásonként azonnal jelenjenek meg az epoch-görbék is a notebookban.
-            tmp_metrics = result_item.get("eval_summary", {}).get("metrics", {})
-            tmp_train = result_item.get("train_summary", {})
-            tmp_eval = result_item.get("eval_summary", {})
-            tmp_row = pd.Series(
-                {
-                    "model": model_name,
-                    "data_variant": data_variant,
-                    "model_path": tmp_eval.get("model_path", tmp_train.get("best_model_path")),
-                    "out_dir": tmp_eval.get("out_dir", tmp_train.get("out_dir")),
-                    "accuracy": _safe_float(tmp_metrics.get("accuracy")),
-                    "recall_macro": _safe_float(tmp_metrics.get("recall_macro")),
-                    "f1_macro": _safe_float(tmp_metrics.get("f1_macro")),
-                    "roc_auc_macro_ovr": _safe_float(tmp_metrics.get("roc_auc_macro_ovr")),
-                    "loss": _safe_float(tmp_metrics.get("loss")),
-                }
-            )
-            plot_training_history_for_row(
-                tmp_row,
-                out_dir=Path(out_dir) / comparison_name,
-                show=show_plots,
-            )
+            if show_each_run:
+                tmp_metrics = result_item.get("eval_summary", {}).get("metrics", {})
+                tmp_train = result_item.get("train_summary", {})
+                tmp_eval = result_item.get("eval_summary", {})
+                tmp_row = pd.Series(
+                    {
+                        "model": model_name,
+                        "data_variant": data_variant,
+                        "model_path": tmp_eval.get("model_path", tmp_train.get("best_model_path")),
+                        "out_dir": tmp_eval.get("out_dir", tmp_train.get("out_dir")),
+                        "accuracy": _safe_float(tmp_metrics.get("accuracy")),
+                        "recall_macro": _safe_float(tmp_metrics.get("recall_macro")),
+                        "f1_macro": _safe_float(tmp_metrics.get("f1_macro")),
+                        "roc_auc_macro_ovr": _safe_float(tmp_metrics.get("roc_auc_macro_ovr")),
+                        "loss": _safe_float(tmp_metrics.get("loss")),
+                    }
+                )
+
+                print("[INFO] Training curves row")
+                plot_training_history_for_row(
+                    tmp_row,
+                    out_dir=Path(out_dir) / comparison_name,
+                    show=show_plots,
+                )
+
+                eval_png = _evaluation_png_from_summary(result_item)
+                if eval_png is not None:
+                    print(f"[INFO] Evaluation row: {eval_png}")
+                    if show_plots:
+                        _display_png(eval_png)
+                else:
+                    print("[WARN] Evaluation row PNG nem található ehhez a futáshoz.")
 
     comparison_df = compare_existing_results(
         result_summaries=all_results,
@@ -983,18 +1020,12 @@ def load_metrics_from_model_dirs(
         raise ValueError("No valid metrics.json files found.")
 
     sort_cols = [c for c in ["f1_macro", "accuracy", "recall_macro"] if c in comparison_df.columns]
-    comparison_df = comparison_df.sort_values(
-        by=sort_cols,
-        ascending=False,
-    ).reset_index(drop=True)
+    comparison_df = comparison_df.sort_values(by=sort_cols, ascending=False).reset_index(drop=True)
 
     out_dir = ensure_dir(Path(out_dir) / comparison_name)
 
     comparison_df.to_csv(out_dir / "comparison.csv", index=False)
-    save_json(
-        {"rows": comparison_df.to_dict(orient="records")},
-        out_dir / "comparison.json",
-    )
+    save_json({"rows": comparison_df.to_dict(orient="records")}, out_dir / "comparison.json")
 
     leaderboard_cols = [
         "model_variant",
