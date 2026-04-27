@@ -220,7 +220,7 @@ def run_evaluation(
         channels=1,
     )
 
-    model = tf.keras.models.load_model(model_path, safe_mode=False)
+    model = tf.keras.models.load_model(model_path, safe_mode=True)
 
     eval_result = model.evaluate(test_ds, verbose=1)
 
