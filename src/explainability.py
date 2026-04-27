@@ -23,9 +23,11 @@ from src.config import (
     ensure_dir,
     save_json,
     get_class_names,
-    get_class_name
+    get_class_name,
+    get_data_root,
 )
 from src.dataloader import build_datasets_from_split_csvs
+from src.dataloader import read_split_csv
 from src.preprocessing import XrayPreprocessLayer, decode_xray_image
 
 # =========================================================
@@ -179,6 +181,8 @@ def make_gradcam_heatmap(
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
     conv_outputs = conv_outputs[0]
 
+    # Itt csatornánként súlyozzuk a konvolúciós aktivációkat az átlagolt gradienssel.
+    # Ez adja a klasszikus Grad-CAM hőtérkép "fontossági" térképét.
     heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
     heatmap = tf.squeeze(heatmap)
 
@@ -367,7 +371,9 @@ def select_example_indices(
         chosen = rng.choice(incorrect_idx, size=min(n_incorrect, len(incorrect_idx)), replace=False)
         selected.extend(chosen.tolist())
 
-    remaining_pool = np.array([i for i in all_idx if i not in selected], dtype=int)
+    # A random mintákhoz először kizárjuk a már kiválasztott indexeket,
+    # így nem lesz átfedés a correct / incorrect / random csoportok között.
+    remaining_pool = np.setdiff1d(all_idx, np.array(selected, dtype=int), assume_unique=False)
     if len(remaining_pool) > 0 and n_random > 0:
         chosen = rng.choice(remaining_pool, size=min(n_random, len(remaining_pool)), replace=False)
         selected.extend(chosen.tolist())
@@ -436,17 +442,23 @@ def run_explainability_qc(
     # -----------------------------------------------------
     # Modell + dataset
     # -----------------------------------------------------
-    model = tf.keras.models.load_model(resolved_model_path, safe_mode = False)
+    model = tf.keras.models.load_model(resolved_model_path, safe_mode=True)
 
-    _, _, test_ds, _, _, test_df = build_datasets_from_split_csvs(
+    _, _, test_ds = build_datasets_from_split_csvs(
         split_dir=split_dir,
         image_size=image_size,
         batch_size=batch_size,
-        seed=seed,
+    )
+    test_df = read_split_csv(Path(split_dir) / "test.csv").copy()
+    raw_root = Path(get_data_root("raw"))
+    test_df["filepath"] = test_df["relative_path"].astype(str).map(
+        lambda rel: str(raw_root / rel)
     )
 
     y_true, y_pred, y_prob = collect_predictions(model, test_ds)
 
+    # Kritikus konzisztencia-ellenőrzés: a DataFrame és a predikciós tömb
+    # sorrendje/hossza egyezzen, különben rossz képre kerülne magyarázat.
     if len(test_df) != len(y_true):
         raise ValueError(
             f"A test_df ({len(test_df)}) és a predikciók száma ({len(y_true)}) eltér."

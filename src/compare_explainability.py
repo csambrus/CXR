@@ -32,7 +32,6 @@ except Exception:  # pragma: no cover - csak config-kompatibilitási védelem
 
 from src.dataloader import build_datasets_from_split_csvs, read_split_csv
 from src.explainability import (
-    make_gradcam_heatmap,
     resize_heatmap_to_image,
     overlay_heatmap_on_image,
     find_last_conv_layer_name,
@@ -122,7 +121,7 @@ def _find_model_path(model_name: str, data_variant: str | None = None) -> Path:
 def load_model_by_name(model_name: str, data_variant: str | None = None):
     model_path = _find_model_path(model_name, data_variant=data_variant)
 
-    model = tf.keras.models.load_model(model_path, safe_mode=False)
+    model = tf.keras.models.load_model(model_path, safe_mode=True)
     last_conv = find_last_conv_layer_name(model)
 
     return model, last_conv, model_path
@@ -251,6 +250,8 @@ def make_gradcam_heatmap_manual(
     """
     image_tensor = tf.cast(image_tensor, tf.float32)
 
+    # Itt kézi forward pass fut, mert nested backbone esetén a klasszikus
+    # Functional grad_model építés (target.output, model.output) sérülékeny.
     with tf.GradientTape() as tape:
         x = image_tensor
         target_activation = None
@@ -360,9 +361,11 @@ def _select_examples(
         selected.extend(incorrect_idx[:half].tolist())
 
     if len(selected) < n_examples:
+        selected_set = set(selected)
         for idx in range(len(y_true)):
-            if idx not in selected:
+            if idx not in selected_set:
                 selected.append(idx)
+                selected_set.add(idx)
             if len(selected) >= n_examples:
                 break
 
