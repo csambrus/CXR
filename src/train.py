@@ -140,8 +140,8 @@ def build_transfer_model(
         )
 
     elif name == "efficientnetb0":
-        # EfficientNetB0 Keras alatt 0..1 inputtal is jól kezelhető,
-        # ezért itt nem skálázzuk vissza 255-re.
+      # EfficientNetB0 előtt vissza 0..255-re
+        x = tf.keras.layers.Rescaling(255.0, name="scale_to_255")(x)
         base_model = tf.keras.applications.EfficientNetB0(
             include_top=False,
             weights=base_weights,
@@ -589,6 +589,14 @@ def run_training(
         print("=" * 72)
 
         base_model.trainable = True
+
+        if model_name.lower() == "efficientnetb0":
+            for layer in base_model.layers[:-30]:
+                layer.trainable = False
+
+            for layer in base_model.layers:
+                if isinstance(layer, tf.keras.layers.BatchNormalization):
+                    layer.trainable = False
 
         compile_model(model, learning_rate=learning_rate_finetune)
         callbacks = build_callbacks(model_out_dir, val_ds=val_ds)
