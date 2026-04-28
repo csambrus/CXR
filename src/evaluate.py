@@ -173,7 +173,7 @@ def plot_confusion_and_roc_row(
     axes[2].grid(True, alpha=0.3)
     axes[2].legend(fontsize=8, loc="lower right")
 
-    fig.suptitle(f"===== EVALUATION ===== {model_name}")
+    fig.suptitle(f"===== EVALUATION ===== \n{model_name}")
     fig.tight_layout()
     fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
     plt.close(fig)
@@ -268,7 +268,7 @@ def run_evaluation(
         y_pred=y_pred,
         y_prob=y_prob,
         class_names=class_names,
-        model_name=model_name,
+        model_name=model_name + " / " + data_variant,
         save_path=eval_out_dir / "evaluation_row.png",
     )
 

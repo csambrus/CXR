@@ -487,6 +487,7 @@ def plot_variants_within_each_model(
             print(f"[INFO] Saved: {save_path}")
 
 
+
 def plot_metric_heatmaps(
     comparison_df: pd.DataFrame,
     out_dir: str | Path,
@@ -498,13 +499,35 @@ def plot_metric_heatmaps(
     if metrics is None:
         metrics = ["accuracy", "recall_macro", "f1_macro", "roc_auc_macro_ovr", "loss"]
 
+    df = comparison_df.copy()
+    df = df.dropna(subset=["model", "data_variant"])
+
+    print("[DEBUG] models:", df["model"].unique())
+    print("[DEBUG] variants:", df["data_variant"].unique())
+    print("[DEBUG] model × variant counts:")
+    print(df.groupby(["model", "data_variant"]).size())
+
     for metric in metrics:
-        if metric not in comparison_df.columns:
+        if metric not in df.columns:
             continue
 
-        pivot_df = comparison_df.pivot(index="model", columns="data_variant", values=metric)
+        plot_df = df.dropna(subset=[metric]).copy()
 
-        fig, ax = plt.subplots(figsize=(8, 5))
+        pivot_df = plot_df.pivot_table(
+            index="model",
+            columns="data_variant",
+            values=metric,
+            aggfunc="mean",
+        )
+
+        if pivot_df.empty:
+            print(f"[WARN] Empty heatmap for metric={metric}")
+            continue
+
+        fig, ax = plt.subplots(
+            figsize=(max(8, 2.2 * len(pivot_df.columns)), max(5, 0.6 * len(pivot_df.index)))
+        )
+
         im = ax.imshow(pivot_df.values, aspect="auto")
 
         ax.set_title(f"Model × variáns heatmap - {metric}")
@@ -513,6 +536,7 @@ def plot_metric_heatmaps(
 
         ax.set_xticks(range(len(pivot_df.columns)))
         ax.set_xticklabels(pivot_df.columns, rotation=30, ha="right")
+
         ax.set_yticks(range(len(pivot_df.index)))
         ax.set_yticklabels(pivot_df.index)
 
@@ -527,8 +551,70 @@ def plot_metric_heatmaps(
 
         save_path = out_dir / f"heatmap_{metric}.png"
         _save_show_close(fig, save_path=save_path, show=show)
+
         print(f"[INFO] Saved: {save_path}")
 
+def plot_models_by_variant_one_row(
+    comparison_df: pd.DataFrame,
+    out_dir: str | Path,
+    metrics: Iterable[str] | None = None,
+    show: bool = False,
+):
+    out_dir = ensure_dir(Path(out_dir) / "models_by_variant_one_row")
+
+    if metrics is None:
+        metrics = ["accuracy", "recall_macro", "f1_macro", "roc_auc_macro_ovr", "loss"]
+
+    variants = list(comparison_df["data_variant"].dropna().unique())
+
+    for metric in metrics:
+        if metric not in comparison_df.columns:
+            continue
+
+        fig, axes = plt.subplots(
+            1,
+            len(variants),
+            figsize=(6 * len(variants), 5),
+            sharey=True,
+        )
+
+        if len(variants) == 1:
+            axes = [axes]
+
+        for ax, variant in zip(axes, variants):
+            sub = comparison_df[comparison_df["data_variant"] == variant].copy()
+
+            if sub.empty:
+                ax.set_title(str(variant))
+                ax.text(0.5, 0.5, "Nincs adat", ha="center", va="center")
+                continue
+
+            ascending = metric == "loss"
+            sub = sub.sort_values(metric, ascending=ascending)
+
+            ax.bar(sub["model"].astype(str), sub[metric])
+
+            ax.set_title(str(variant))
+            ax.set_xlabel("Model")
+            ax.grid(True, axis="y", alpha=0.3)
+            ax.tick_params(axis="x", rotation=30)
+
+            if metric != "loss":
+                ax.set_ylim(0, 1)
+
+        axes[0].set_ylabel(metric)
+
+        fig.suptitle(
+            f"Modellek összehasonlítása variánsonként - {metric}",
+            fontsize=14,
+        )
+
+        fig.tight_layout(rect=[0, 0, 1, 0.90])
+
+        save_path = out_dir / f"models_by_variant_one_row_{metric}.png"
+        _save_show_close(fig, save_path=save_path, show=show)
+
+        print(f"[INFO] Saved: {save_path}")
 
 def plot_all_main_metrics(
     comparison_df: pd.DataFrame,
@@ -542,7 +628,7 @@ def plot_all_main_metrics(
     for metric in metrics_to_plot:
         if metric not in comparison_df.columns:
             continue
-
+        
         plot_metric_bars(
             comparison_df=comparison_df,
             metric=metric,
@@ -550,7 +636,7 @@ def plot_all_main_metrics(
             title=f"Comparison - {metric}",
             show=show,
         )
-
+        
         plot_metric_by_variant(
             comparison_df=comparison_df,
             metric=metric,
@@ -559,11 +645,14 @@ def plot_all_main_metrics(
             show=show,
         )
 
-    plot_models_within_each_variant(comparison_df, out_dir, show=show)
-    plot_variants_within_each_model(comparison_df, out_dir, show=show)
+    plot_models_by_variant_one_row(
+        comparison_df=comparison_df,
+        out_dir=out_dir,
+        metrics=metrics_to_plot,
+        show=show,
+    )
+
     plot_metric_heatmaps(comparison_df, out_dir, show=show)
-
-
 # =========================================================
 # Plot helpers: epoch history
 # =========================================================
@@ -655,41 +744,98 @@ def plot_history_comparison_by_variant(
     metric: str = "val_accuracy",
     show: bool = False,
 ):
+    """
+    Egyetlen kombinált ábra:
+    - 3 data_variant egymás mellett, egy sorban
+    - minden subploton az adott variánshoz tartozó összes modell görbéje
+    """
+
     out_dir = ensure_dir(Path(out_dir) / "epoch_comparison_by_variant")
 
-    for variant, sub in comparison_df.groupby("data_variant"):
-        fig, ax = plt.subplots(figsize=(8, 5))
+    variants = list(comparison_df["data_variant"].dropna().unique())
+    n_variants = len(variants)
+
+    if n_variants == 0:
+        print("[WARN] No data_variant found in comparison_df.")
+        return None
+
+    fig, axes = plt.subplots(
+        1,
+        n_variants,
+        figsize=(6 * n_variants, 5),
+        sharey=True,
+    )
+
+    if n_variants == 1:
+        axes = [axes]
+
+    any_plotted = False
+
+    for ax, variant in zip(axes, variants):
+        sub = comparison_df[comparison_df["data_variant"] == variant]
         plotted = False
 
         for _, row in sub.iterrows():
             model = str(row["model"])
             model_dir = _infer_model_dir(row)
+
             if model_dir is None:
                 continue
 
             hist = find_training_history(model_dir)
-            if hist is None or metric not in hist.columns:
+
+            if hist is None:
                 continue
 
-            ax.plot(hist["epoch"], hist[metric], marker="o", label=model)
+            if metric not in hist.columns:
+                print(f"[WARN] Missing metric '{metric}' in history for model={model}, variant={variant}")
+                continue
+
+            if "epoch" in hist.columns:
+                x = hist["epoch"]
+            else:
+                x = range(1, len(hist) + 1)
+
+            ax.plot(
+                x,
+                hist[metric],
+                marker="o",
+                label=model,
+            )
+
             plotted = True
+            any_plotted = True
 
-        if not plotted:
-            plt.close(fig)
-            continue
-
-        ax.set_title(f"Modellek epochonkénti összehasonlítása\nvariant={variant} | metric={metric}")
+        ax.set_title(f"{variant}")
         ax.set_xlabel("Epoch")
-        ax.set_ylabel(metric)
         ax.grid(True, alpha=0.3)
-        ax.legend()
 
-        fig.tight_layout()
+        if plotted:
+            ax.legend(fontsize=8)
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "Nincs elérhető history",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
 
-        save_path = out_dir / f"{variant}_{metric}.png"
-        _save_show_close(fig, save_path=save_path, show=show)
-        print(f"[INFO] Saved: {save_path}")
+    axes[0].set_ylabel(metric)
 
+    fig.suptitle(
+        f"Modellek epochonkénti összehasonlítása variánsonként\nmetric={metric}",
+        fontsize=14,
+    )
+
+    fig.tight_layout(rect=[0, 0, 1, 0.90])
+
+    save_path = out_dir / f"combined_by_variant_{metric}.png"
+    _save_show_close(fig, save_path=save_path, show=show)
+
+    print(f"[INFO] Saved: {save_path}")
+    return save_path
 
 def plot_history_comparison_by_model(
     comparison_df: pd.DataFrame,
