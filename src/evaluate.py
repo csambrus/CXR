@@ -22,43 +22,14 @@ from src.config import (
     BATCH_SIZE,
     IMAGE_SIZE,
     NUM_CLASSES,
-    PLOT_DPI,
     ensure_dir,
     get_class_names,
     get_data_root,
     save_json,
 )
 from src.dataloader import build_datasets_from_split_csvs
-
-
-# =========================================================
-# Core prediction helpers
-# =========================================================
-
-def collect_predictions(
-    model: tf.keras.Model,
-    dataset: tf.data.Dataset,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    y_true_all = []
-    y_prob_all = []
-
-    for x_batch, y_batch in dataset:
-        prob = model.predict(x_batch, verbose=0)
-        y_true_all.append(y_batch.numpy())
-        y_prob_all.append(prob)
-
-    y_true = np.concatenate(y_true_all, axis=0)
-    y_prob = np.concatenate(y_prob_all, axis=0)
-
-    if not np.all(np.isfinite(y_prob)):
-        raise ValueError(
-            "[ERROR] A modell predikciója NaN vagy inf értéket tartalmaz. "
-            "Ellenőrizd a tanítást, preprocessinget és input skálázást."
-        )
-
-    y_pred = np.argmax(y_prob, axis=1)
-
-    return y_true, y_pred, y_prob
+from src.plot_utils import save_show_close_figure
+from src.prediction_utils import collect_predictions
 
 
 def compute_metrics(
@@ -175,8 +146,7 @@ def plot_confusion_and_roc_row(
 
     fig.suptitle(f"===== EVALUATION ===== \n{model_name}")
     fig.tight_layout()
-    fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
-    plt.close(fig)
+    save_show_close_figure(fig, save_path=save_path, show=False)
 
 
 # =========================================================

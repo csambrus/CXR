@@ -17,10 +17,10 @@ from src.config import (
     OUTPUT_DIR,
     SPLITS_DIR,
     RAW_DIR,
-    PLOT_DPI,
     get_class_name,
     ensure_dir,
 )
+from src.plot_utils import save_show_close_figure
 
 # A variant könyvtárak nem minden régebbi configban léteztek, de az új
 # projektstruktúrában ezek kellenek a raw / lung_masked / lung_crop kezeléshez.
@@ -42,16 +42,10 @@ from src.explainability import (
 # Helpers
 # =========================================================
 
-def _normalize_model_names(model_names: str | Iterable[str]) -> list[str]:
-    if isinstance(model_names, str):
-        return [model_names]
-    return list(model_names)
-
-
-def _normalize_variants(data_variants: str | Iterable[str]) -> list[str]:
-    if isinstance(data_variants, str):
-        return [data_variants]
-    return list(data_variants)
+def _normalize_to_list(values: str | Iterable[str]) -> list[str]:
+    # Magyarazat: a publikus API elfogad egy stringet vagy listat is,
+    # de a belso logika mindig listaval dolgozik.
+    return [values] if isinstance(values, str) else list(values)
 
 
 def _safe_get_class_name(label: int) -> str:
@@ -396,8 +390,8 @@ def run_compare_explainability(
 
     A PNG-ket menti, és show=True esetén notebookban is megjeleníti.
     """
-    model_names = _normalize_model_names(model_names)
-    data_variants = _normalize_variants(data_variants)
+    model_names = _normalize_to_list(model_names)
+    data_variants = _normalize_to_list(data_variants)
     split_dir = Path(split_dir)
 
     if out_dir is None:
@@ -571,12 +565,7 @@ def run_compare_explainability(
             )
 
             fig.tight_layout()
-            fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
-
-            if show:
-                plt.show()
-            else:
-                plt.close(fig)
+            save_show_close_figure(fig, save_path=save_path, show=show)
 
             print(f"[INFO] Saved: {save_path}")
 

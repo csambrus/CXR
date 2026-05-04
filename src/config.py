@@ -89,6 +89,7 @@ CLASS_INFOS = [
 NUM_CLASSES = len(CLASS_INFOS)
 CLASS_BY_KEY = {c.key: c for c in CLASS_INFOS}
 CLASS_BY_IDX = {c.idx: c for c in CLASS_INFOS}
+CLASS_NAME_BY_IDX = {c.idx: c.display_name for c in CLASS_INFOS}
 
 # =========================================================
 # Split CSV-k
@@ -175,10 +176,8 @@ def get_class_names() -> list[str]:
     return [c.display_name for c in CLASS_INFOS]
 
 def get_class_name(idx: int) -> str:
-    class_names = get_class_names()
-    if 0 <= idx < len(class_names):
-        return class_names[idx]
-    return f"class_{idx}"
+    # Gyors direkt lookup: ne epitsunk uj listat minden hivasnal.
+    return CLASS_NAME_BY_IDX.get(idx, f"class_{idx}")
 
 def save_json(data: dict[str, Any], path: str | Path) -> None:
     path = Path(path)

@@ -29,6 +29,7 @@ from src.config import (
 from src.dataloader import build_datasets_from_split_csvs
 from src.dataloader import read_split_csv
 from src.preprocessing import XrayPreprocessLayer, decode_xray_image
+from src.prediction_utils import collect_predictions
 
 # =========================================================
 # Modell path helper
@@ -101,26 +102,6 @@ def load_processed_input(
     raw = decode_xray_image(tf.convert_to_tensor(str(path)))
     proc = preprocess(raw)
     return proc.numpy()
-
-
-# =========================================================
-# Predikciók összegyűjtése a teljes test setre
-# =========================================================
-
-def collect_predictions(model, dataset):
-    y_true: list[int] = []
-    y_pred: list[int] = []
-    y_prob: list[list[float]] = []
-
-    for images, labels in dataset:
-        probs = model.predict(images, verbose=0)
-        preds = np.argmax(probs, axis=1)
-
-        y_true.extend(labels.numpy().tolist())
-        y_pred.extend(preds.tolist())
-        y_prob.extend(probs.tolist())
-
-    return np.array(y_true), np.array(y_pred), np.array(y_prob)
 
 
 # =========================================================
