@@ -102,49 +102,15 @@ TEST_CSV = SPLITS_DIR / "test.csv"
 # =========================================================
 IMAGE_HEIGHT = 224
 IMAGE_WIDTH = 224
-IMAGE_CHANNELS = 3
 IMAGE_SIZE = (IMAGE_HEIGHT, IMAGE_WIDTH)
 
-# =========================================================
-# Split arányok
-# =========================================================
-TRAIN_RATIO = 0.70
-VAL_RATIO = 0.15
-TEST_RATIO = 0.15
-
 SEED = 42
-SHUFFLE_DATA = True
 
 # =========================================================
 # DataLoader / tf.data
 # =========================================================
 BATCH_SIZE =128
 CACHE_DATASET = True
-PREFETCH_DATASET = True
-
-# =========================================================
-# Preprocessing / augmentáció
-# =========================================================
-USE_MODEL_PREPROCESSING = True
-NORMALIZE_TO_0_1 = True
-
-# Később bővíthető:
-USE_CLAHE = False
-USE_GAUSSIAN_BLUR = False
-USE_HIST_EQ = False
-
-# =========================================================
-# Training baseline
-# =========================================================
-EPOCHS = 15
-LEARNING_RATE = 1e-4
-
-# =========================================================
-# Modellek
-# =========================================================
-BACKBONE_NAME = "DenseNet121"
-USE_IMAGENET_WEIGHTS = True
-FREEZE_BACKBONE = True
 
 PLOT_DPI = 150
 # =========================================================
