@@ -22,6 +22,7 @@ from src.runtime import set_seed
 
 from src.config import (
     BATCH_SIZE,
+    EPOCHS,
     IMAGE_SIZE,
     MODELS_DIR,
     NUM_CLASSES,
@@ -33,8 +34,6 @@ from src.config import (
     save_json,
 )
 from src.dataloader import build_datasets_from_split_csvs, build_default_augmentation
-
-DEFAULT_EPOCHS_HEAD = 15
 
 
 # =========================================================
@@ -511,7 +510,7 @@ def run_training(
     model_name: str = "baseline_cnn",
     pretrained: bool = True,
     do_fine_tuning: bool = False,
-    epochs_head: int = DEFAULT_EPOCHS_HEAD,
+    epochs_head: int = EPOCHS,
     epochs_finetune: int = 5,
     learning_rate_head: float = 1e-3,
     learning_rate_finetune: float = 1e-5,
