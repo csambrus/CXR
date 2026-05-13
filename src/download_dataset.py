@@ -6,7 +6,7 @@ from pathlib import Path
 
 import kagglehub
 
-from src.config import RAW_DIR, SEGMENTATION_RAW_DIR, ensure_dir
+from src.config import GDRIVE_DATA, IS_COLAB, RAW_DIR, SEGMENTATION_RAW_DIR, ensure_dir
 
 
 # =========================================================
@@ -23,6 +23,10 @@ CRD_SEG_SLUG = "mrunalnshah/crd-chest-x-ray-images-with-lung-segmented-masks"
 
 COVID_READY_MARKER = RAW_DIR / ".dataset_ready"
 SEG_READY_MARKER = SEGMENTATION_RAW_DIR / ".dataset_ready"
+
+DRIVE_CACHE_ROOT = GDRIVE_DATA / "download_cache"
+CLASSIFIER_CACHE_DIR = DRIVE_CACHE_ROOT / "classifier_dataset"
+SEGMENTATION_CACHE_DIR = DRIVE_CACHE_ROOT / "segmentation_dataset"
 
 
 # =========================================================
@@ -57,6 +61,12 @@ def copytree_merge(src: Path, dst: Path) -> None:
             if target.exists():
                 continue
             shutil.copy2(item, target)
+
+
+def _has_any_files(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    return any(path.iterdir())
 
 
 # =========================================================
@@ -197,23 +207,45 @@ def move_segmentation_dataset(
 # Letöltés
 # =========================================================
 
-def _download_to_temp(slug: str) -> Path:
+def _download_to_temp(slug: str, cache_dir: Path | None = None) -> Path:
     """
     KaggleHub letöltés temp helyre.
     A kagglehub.dataset_download egy cache-elt lokációt ad vissza.
     Innen egy ideiglenes munkakönyvtárba másolunk, hogy biztonságosan
     tudjunk move-olni.
     """
-    downloaded_path = Path(kagglehub.dataset_download(slug))
-    print(f"[INFO] KaggleHub downloaded/cached at: {downloaded_path}")
+    source_root: Path
+
+    if cache_dir is not None:
+        ensure_dir(cache_dir)
+
+        if _has_any_files(cache_dir):
+            print(f"[INFO] Using cached dataset from Drive: {cache_dir}")
+            source_root = cache_dir
+        else:
+            downloaded_path = Path(kagglehub.dataset_download(slug))
+            print(f"[INFO] KaggleHub downloaded/cached at: {downloaded_path}")
+            print(f"[INFO] Caching dataset into Drive: {cache_dir}")
+
+            if downloaded_path.is_dir():
+                copytree_merge(downloaded_path, cache_dir)
+            else:
+                raise RuntimeError(f"[ERROR] Downloaded path is not a directory: {downloaded_path}")
+
+            source_root = cache_dir
+    else:
+        downloaded_path = Path(kagglehub.dataset_download(slug))
+        print(f"[INFO] KaggleHub downloaded/cached at: {downloaded_path}")
+
+        if not downloaded_path.is_dir():
+            raise RuntimeError(f"[ERROR] Downloaded path is not a directory: {downloaded_path}")
+
+        source_root = downloaded_path
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="cxr_download_"))
     print(f"[INFO] Temporary working dir: {tmp_dir}")
 
-    if downloaded_path.is_dir():
-        copytree_merge(downloaded_path, tmp_dir)
-    else:
-        raise RuntimeError(f"[ERROR] Downloaded path is not a directory: {downloaded_path}")
+    copytree_merge(source_root, tmp_dir)
 
     return tmp_dir
 
@@ -228,10 +260,13 @@ def download_classifier_dataset(force: bool = False) -> None:
     if force:
         print("[INFO] Force download requested for classifier dataset.")
         remove_if_exists(COVID_READY_MARKER)
+        if IS_COLAB:
+            remove_if_exists(CLASSIFIER_CACHE_DIR)
 
     tmp_dir = None
     try:
-        tmp_dir = _download_to_temp(COVID_CRD_SLUG)
+        cache_dir = CLASSIFIER_CACHE_DIR if IS_COLAB else None
+        tmp_dir = _download_to_temp(COVID_CRD_SLUG, cache_dir=cache_dir)
         move_classifier_dataset(tmp_dir)
         print("[OK] Classifier dataset ready.")
     finally:
@@ -249,10 +284,13 @@ def download_segmentation_dataset(force: bool = False) -> None:
     if force:
         print("[INFO] Force download requested for segmentation dataset.")
         remove_if_exists(SEG_READY_MARKER)
+        if IS_COLAB:
+            remove_if_exists(SEGMENTATION_CACHE_DIR)
 
     tmp_dir = None
     try:
-        tmp_dir = _download_to_temp(CRD_SEG_SLUG)
+        cache_dir = SEGMENTATION_CACHE_DIR if IS_COLAB else None
+        tmp_dir = _download_to_temp(CRD_SEG_SLUG, cache_dir=cache_dir)
         move_segmentation_dataset(tmp_root=tmp_dir)
         print("[OK] Segmentation dataset ready.")
     finally:

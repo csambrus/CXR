@@ -12,8 +12,6 @@ import sys
 # -------------------------------------------------
 
 IS_COLAB = "google.colab" in sys.modules
-IS_RUNPOD = "RUNPOD_POD_ID" in os.environ
-IS_KAGGLE = "KAGGLE_KERNEL_RUN_TYPE" in os.environ
 
 # -------------------------------------------------
 # Projekt gyökér
@@ -21,22 +19,18 @@ IS_KAGGLE = "KAGGLE_KERNEL_RUN_TYPE" in os.environ
 
 if IS_COLAB:
     PROJECT_ROOT = Path("/content/CXR")
-
-elif IS_RUNPOD:
-    PROJECT_ROOT = Path("/workspace/CXR")
-
 else:
     PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# Drive háttértár (cache / artifact backup)
+GDRIVE_DATA = Path("/content/drive/MyDrive/CXR/data")
+GDRIVE_OUTPUT = Path("/content/drive/MyDrive/CXR/outputs")
 
 # =========================================================
 # Könyvtárak
 # =========================================================
-if IS_COLAB:
-    DATA_DIR = Path("/content/drive/MyDrive/CXR/data")
-    OUTPUT_DIR = Path("/content/drive/MyDrive/CXR/outputs")
-else:
-    DATA_DIR = PROJECT_ROOT / "data"
-    OUTPUT_DIR = PROJECT_ROOT / "outputs"
+DATA_DIR = PROJECT_ROOT / "data"
+OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
 RAW_DIR = DATA_DIR / "raw"
 INTERIM_DIR = DATA_DIR / "interim"
@@ -46,6 +40,7 @@ MODELS_DIR = INTERIM_DIR / "models"
 FIGURES_DIR = OUTPUT_DIR / "figures"
 REPORTS_DIR = OUTPUT_DIR / "reports"
 LOGS_DIR = OUTPUT_DIR / "logs"
+LOG_DIR = LOGS_DIR
 
 # segmentation related dirs
 SEGMENTATION_RAW_DIR = DATA_DIR / "segment_raw"
@@ -63,9 +58,11 @@ LUNG_CROP_DIR   = SEGMENTATION_DATA_DIR / "lung_crop"
 # -------------------------------------------------
 
 print("IS_COLAB:", IS_COLAB)
-print("IS_RUNPOD:", IS_RUNPOD)
 print("PROJECT_ROOT:", PROJECT_ROOT)
 print("DATA_DIR:", DATA_DIR)
+print("OUTPUT_DIR:", OUTPUT_DIR)
+print("GDRIVE_DATA:", GDRIVE_DATA)
+print("GDRIVE_OUTPUT:", GDRIVE_OUTPUT)
 
 
 # =========================================================
@@ -103,49 +100,16 @@ TEST_CSV = SPLITS_DIR / "test.csv"
 # =========================================================
 IMAGE_HEIGHT = 224
 IMAGE_WIDTH = 224
-IMAGE_CHANNELS = 3
 IMAGE_SIZE = (IMAGE_HEIGHT, IMAGE_WIDTH)
 
-# =========================================================
-# Split arányok
-# =========================================================
-TRAIN_RATIO = 0.70
-VAL_RATIO = 0.15
-TEST_RATIO = 0.15
-
-SEED = 42
-SHUFFLE_DATA = True
+SEED = int(os.environ.get("SEED", "42"))
+EPOCHS = int(os.environ.get("EPOCHS", "15"))
 
 # =========================================================
 # DataLoader / tf.data
 # =========================================================
 BATCH_SIZE =128
 CACHE_DATASET = True
-PREFETCH_DATASET = True
-
-# =========================================================
-# Preprocessing / augmentáció
-# =========================================================
-USE_MODEL_PREPROCESSING = True
-NORMALIZE_TO_0_1 = True
-
-# Később bővíthető:
-USE_CLAHE = False
-USE_GAUSSIAN_BLUR = False
-USE_HIST_EQ = False
-
-# =========================================================
-# Training baseline
-# =========================================================
-EPOCHS = 15
-LEARNING_RATE = 1e-4
-
-# =========================================================
-# Modellek
-# =========================================================
-BACKBONE_NAME = "DenseNet121"
-USE_IMAGENET_WEIGHTS = True
-FREEZE_BACKBONE = True
 
 PLOT_DPI = 150
 # =========================================================

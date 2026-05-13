@@ -16,11 +16,12 @@ from src.runtime import set_seed
 
 from src.config import (
     BATCH_SIZE,
+    EPOCHS,
     IMAGE_SIZE,
     MODELS_DIR,
     NUM_CLASSES,
-    EPOCHS,
     SEED,
+    ensure_dir,
     get_class_names,
     get_data_root,
     save_json,
