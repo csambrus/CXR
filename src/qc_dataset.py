@@ -6,14 +6,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import numpy as np
 
 from src.config import BATCH_SIZE, CLASS_INFOS, IMAGE_SIZE, RAW_DIR, SEED, SPLITS_DIR, OUTPUT_DIR, ensure_dir
 from src.dataloader import (
-    build_datasets_from_root,
+    build_datasets_from_split_csvs,
     build_metadata_dataframe,
-    get_class_distribution,
-    inspect_batch,
-    print_class_distribution,
+    create_splits,
+    read_split_csv,
 )
 from src.preprocessing import plot_random_pre_post_samples_per_class
 
@@ -24,18 +24,50 @@ def distribution_df_to_records(dist_df):
     if dist_df.empty:
         return []
 
-    records = []
-    for _, row in dist_df.iterrows():
-        records.append(
-            {
-                "label": int(row["label"]),
-                "class_key": str(row["class_key"]),
-                "class_name": str(row["class_name"]),
-                "count": int(row["count"]),
-                "ratio": float(row["ratio"]),
-            }
-        )
+    records = dist_df[["label", "class_key", "class_name", "count", "ratio"]].to_dict(orient="records")
+    for rec in records:
+        rec["label"] = int(rec["label"])
+        rec["class_key"] = str(rec["class_key"])
+        rec["class_name"] = str(rec["class_name"])
+        rec["count"] = int(rec["count"])
+        rec["ratio"] = float(rec["ratio"])
     return records
+
+
+def get_class_distribution(df):
+    dist_df = (
+        df.groupby(["label", "class_key", "class_name"], dropna=False)
+        .size()
+        .reset_index(name="count")
+        .sort_values("label")
+        .reset_index(drop=True)
+    )
+    total = int(dist_df["count"].sum())
+    if total > 0:
+        dist_df["ratio"] = dist_df["count"] / total
+    else:
+        dist_df["ratio"] = 0.0
+    return dist_df
+
+
+def print_class_distribution(df, title="Class distribution"):
+    dist_df = get_class_distribution(df)
+    print("\n" + title)
+    print("-" * 80)
+    if dist_df.empty:
+        print("[WARN] Empty dataframe.")
+    else:
+        print(dist_df.to_string(index=False))
+    print("-" * 80)
+
+
+def inspect_batch(ds):
+    x_batch, y_batch = next(iter(ds.take(1)))
+    print(f"images shape: {tuple(x_batch.shape)}")
+    print(f"labels shape: {tuple(y_batch.shape)}")
+    labels = y_batch.numpy().astype(int)
+    uniq, counts = np.unique(labels, return_counts=True)
+    print("label counts in batch:", {int(k): int(v) for k, v in zip(uniq, counts)})
 
 
 # =========================================================
@@ -44,7 +76,7 @@ def distribution_df_to_records(dist_df):
 
 def run_dataset_qc(
     root_dir: str | Path = RAW_DIR,
-    out_dir: str | Path = None,
+    out_dir: str | Path | None = None,
     splits_dir: str | Path = SPLITS_DIR,
     test_size: float = 0.15,
     val_size: float = 0.15,
@@ -95,16 +127,28 @@ def run_dataset_qc(
     # 2. Split + tf.data datasets
     # -----------------------------------------------------
     print("\n[2/6] Building train/val/test splits and tf.data datasets...")
-    train_ds, val_ds, test_ds, train_df, val_df, test_df = build_datasets_from_root(
-        root_dir=root_dir,
-        test_size=test_size,
+    create_splits(
+        source_root=root_dir,
+        split_dir=split_dir,
+        train_size=1.0 - (test_size + val_size),
         val_size=val_size,
-        image_size=image_size,
-        batch_size=batch_size,
+        test_size=test_size,
         seed=seed,
-        stratify=True,
-        export_dir=split_dir,
+        overwrite=True,
     )
+
+    # A dataset építés ugyanazt a split CSV-t használja, ezért a későbbi
+    # minőségellenőrzési statisztikák (train/val/test) reprodukálhatóak.
+    train_ds, val_ds, test_ds = build_datasets_from_split_csvs(
+        split_dir=split_dir,
+        data_root=root_dir,
+        batch_size=batch_size,
+        image_size=image_size,
+        channels=1,
+    )
+    train_df = read_split_csv(split_dir / "train.csv")
+    val_df = read_split_csv(split_dir / "val.csv")
+    test_df = read_split_csv(split_dir / "test.csv")
 
     # -----------------------------------------------------
     # 3. Preview képek mentése
@@ -138,13 +182,13 @@ def run_dataset_qc(
     # -----------------------------------------------------
     print("\n[5/6] Batch sanity check...")
     print("\nTrain batch:")
-    inspect_batch(train_ds, n_classes=len(CLASS_INFOS))
+    inspect_batch(train_ds)
 
     print("\nValidation batch:")
-    inspect_batch(val_ds, n_classes=len(CLASS_INFOS))
+    inspect_batch(val_ds)
 
     print("\nTest batch:")
-    inspect_batch(test_ds, n_classes=len(CLASS_INFOS))
+    inspect_batch(test_ds)
 
     # -----------------------------------------------------
     # 5. Summary JSON
@@ -154,6 +198,8 @@ def run_dataset_qc(
     val_dist_df = get_class_distribution(val_df)
     test_dist_df = get_class_distribution(test_df)
 
+    # Ez a JSON a teljes QC futás "forrás-igazsága": paraméterek, eloszlások
+    # és artefakt útvonalak egy helyen, hogy később auditálható legyen.
     summary = {
         "root_dir": str(root_dir),
         "out_dir": str(out_dir),
@@ -187,9 +233,9 @@ def run_dataset_qc(
         "artifacts": {
             "full_metadata_csv": str(out_dir / "full_metadata.csv"),
             "full_distribution_csv": str(out_dir / "full_distribution.csv"),
-            "split_train_csv": str(split_dir / "split_train.csv"),
-            "split_val_csv": str(split_dir / "split_val.csv"),
-            "split_test_csv": str(split_dir / "split_test.csv"),
+            "split_train_csv": str(split_dir / "train.csv"),
+            "split_val_csv": str(split_dir / "val.csv"),
+            "split_test_csv": str(split_dir / "test.csv"),
             "distribution_train_csv": str(out_dir / "distribution_train.csv"),
             "distribution_val_csv": str(out_dir / "distribution_val.csv"),
             "distribution_test_csv": str(out_dir / "distribution_test.csv"),

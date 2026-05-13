@@ -17,10 +17,10 @@ from src.config import (
     OUTPUT_DIR,
     SPLITS_DIR,
     RAW_DIR,
-    PLOT_DPI,
     get_class_name,
     ensure_dir,
 )
+from src.plot_utils import save_show_close_figure
 
 # A variant könyvtárak nem minden régebbi configban léteztek, de az új
 # projektstruktúrában ezek kellenek a raw / lung_masked / lung_crop kezeléshez.
@@ -32,7 +32,6 @@ except Exception:  # pragma: no cover - csak config-kompatibilitási védelem
 
 from src.dataloader import build_datasets_from_split_csvs, read_split_csv
 from src.explainability import (
-    make_gradcam_heatmap,
     resize_heatmap_to_image,
     overlay_heatmap_on_image,
     find_last_conv_layer_name,
@@ -43,16 +42,10 @@ from src.explainability import (
 # Helpers
 # =========================================================
 
-def _normalize_model_names(model_names: str | Iterable[str]) -> list[str]:
-    if isinstance(model_names, str):
-        return [model_names]
-    return list(model_names)
-
-
-def _normalize_variants(data_variants: str | Iterable[str]) -> list[str]:
-    if isinstance(data_variants, str):
-        return [data_variants]
-    return list(data_variants)
+def _normalize_to_list(values: str | Iterable[str]) -> list[str]:
+    # Magyarazat: a publikus API elfogad egy stringet vagy listat is,
+    # de a belso logika mindig listaval dolgozik.
+    return [values] if isinstance(values, str) else list(values)
 
 
 def _safe_get_class_name(label: int) -> str:
@@ -122,7 +115,7 @@ def _find_model_path(model_name: str, data_variant: str | None = None) -> Path:
 def load_model_by_name(model_name: str, data_variant: str | None = None):
     model_path = _find_model_path(model_name, data_variant=data_variant)
 
-    model = tf.keras.models.load_model(model_path, safe_mode=False)
+    model = tf.keras.models.load_model(model_path, safe_mode=True)
     last_conv = find_last_conv_layer_name(model)
 
     return model, last_conv, model_path
@@ -251,6 +244,8 @@ def make_gradcam_heatmap_manual(
     """
     image_tensor = tf.cast(image_tensor, tf.float32)
 
+    # Itt kézi forward pass fut, mert nested backbone esetén a klasszikus
+    # Functional grad_model építés (target.output, model.output) sérülékeny.
     with tf.GradientTape() as tape:
         x = image_tensor
         target_activation = None
@@ -360,9 +355,11 @@ def _select_examples(
         selected.extend(incorrect_idx[:half].tolist())
 
     if len(selected) < n_examples:
+        selected_set = set(selected)
         for idx in range(len(y_true)):
-            if idx not in selected:
+            if idx not in selected_set:
                 selected.append(idx)
+                selected_set.add(idx)
             if len(selected) >= n_examples:
                 break
 
@@ -393,8 +390,8 @@ def run_compare_explainability(
 
     A PNG-ket menti, és show=True esetén notebookban is megjeleníti.
     """
-    model_names = _normalize_model_names(model_names)
-    data_variants = _normalize_variants(data_variants)
+    model_names = _normalize_to_list(model_names)
+    data_variants = _normalize_to_list(data_variants)
     split_dir = Path(split_dir)
 
     if out_dir is None:
@@ -568,12 +565,7 @@ def run_compare_explainability(
             )
 
             fig.tight_layout()
-            fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
-
-            if show:
-                plt.show()
-            else:
-                plt.close(fig)
+            save_show_close_figure(fig, save_path=save_path, show=show)
 
             print(f"[INFO] Saved: {save_path}")
 

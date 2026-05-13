@@ -12,12 +12,6 @@ import tensorflow as tf
 from sklearn.metrics import recall_score, roc_auc_score
 from sklearn.preprocessing import label_binarize
 
-try:
-    from IPython.display import Image as IPyImage, display
-except Exception:  # notebookon kívül is működjön
-    IPyImage = None
-    display = None
-
 from src.runtime import set_seed
 
 from src.config import (
@@ -26,46 +20,13 @@ from src.config import (
     MODELS_DIR,
     NUM_CLASSES,
     EPOCHS,
-    PLOT_DPI,
     SEED,
-    ensure_dir,
     get_class_names,
     get_data_root,
     save_json,
 )
 from src.dataloader import build_datasets_from_split_csvs, build_default_augmentation
-
-
-# =========================================================
-# Display helpers
-# =========================================================
-
-def _display_png(path: str | Path) -> None:
-    """PNG megjelenítése notebookban, ha IPython környezetben fut."""
-    if display is None or IPyImage is None:
-        return
-
-    path = Path(path)
-    if path.exists():
-        display(IPyImage(filename=str(path)))
-
-
-def _save_show_close(
-    fig: plt.Figure,
-    save_path: str | Path | None = None,
-    show: bool = False,
-) -> None:
-    if save_path is not None:
-        save_path = Path(save_path)
-        ensure_dir(save_path.parent)
-        fig.savefig(save_path, dpi=PLOT_DPI, bbox_inches="tight")
-
-    if show:
-        plt.show()
-        if save_path is not None:
-            _display_png(save_path)
-    else:
-        plt.close(fig)
+from src.plot_utils import display_png_if_available, save_show_close_figure
 
 
 # =========================================================
@@ -497,7 +458,9 @@ def plot_training_history(
     fig.suptitle(title)
     fig.tight_layout()
 
-    _save_show_close(fig, save_path=save_path, show=show)
+    save_show_close_figure(fig, save_path=save_path, show=show)
+    if show and save_path is not None:
+        display_png_if_available(save_path)
 
 
 # =========================================================
