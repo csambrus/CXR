@@ -499,3 +499,48 @@ def plot_report_best_models(
         save_show_close_figure(fig, save_path=p2, show=show)
 
     return p1, p2
+
+
+def plot_f1_macro_ranking_all_combos(
+    comparison_df: pd.DataFrame,
+    out_dir: str | Path,
+    show: bool = False,
+) -> Path | None:
+    """
+    Minden modell × variáns sor F1 makró szerint (legjobb felül, legrosszabb alul), vízszintes oszlopdiagram.
+    """
+    need = {"model", "data_variant", "f1_macro"}
+    if not need.issubset(comparison_df.columns):
+        return None
+    df = comparison_df.dropna(subset=list(need)).copy()
+    if len(df) == 0:
+        return None
+    df = (
+        df.sort_values("f1_macro", ascending=False)
+        .drop_duplicates(subset=["model", "data_variant"], keep="first")
+        .reset_index(drop=True)
+    )
+    mc = model_colors()
+    labels = [
+        f"{model_display(str(r['model']))} / {variant_display(str(r['data_variant']))}"
+        for _, r in df.iterrows()
+    ]
+    heights = df["f1_macro"].astype(float).tolist()
+    colors = [mc.get(str(r["model"]), (0.55, 0.55, 0.55, 1.0)) for _, r in df.iterrows()]
+    fig_h = max(5.5, 0.36 * len(df))
+    fig, ax = plt.subplots(figsize=(10.5, fig_h))
+    y = np.arange(len(df))
+    ax.barh(y, heights, color=colors, edgecolor="black", linewidth=0.3)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.invert_yaxis()
+    ax.set_xlabel("F1 (makró)")
+    ax.set_title("Összes modell × variáns (F1 makró: legjobb → legrosszabb)")
+    ax.set_xlim(0, 1.0)
+    ax.grid(True, axis="x", alpha=0.3)
+    for yi, val in zip(y, heights):
+        ax.text(min(float(val) + 0.02, 0.97), yi, f"{val:.3f}", va="center", fontsize=8)
+    fig.tight_layout()
+    out_path = ensure_dir(Path(out_dir) / "best_models_plots") / "f1_macro_ranking_all_model_variant.png"
+    save_show_close_figure(fig, save_path=out_path, show=show)
+    return out_path

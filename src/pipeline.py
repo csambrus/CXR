@@ -13,7 +13,7 @@ from src.compare_models import (
     print_leaderboard,
     run_multiple_models,
 )
-from src.compare_models_plots import plot_report_best_models
+from src.compare_models_plots import plot_f1_macro_ranking_all_combos, plot_report_best_models
 from src.comparison_order import reorder_comparison_df
 from src.config import MODELS_DIR, ensure_dir, save_json
 
@@ -215,6 +215,10 @@ def report_best_models(
         print(INFO_SAVED, p1)
     if p2 is not None:
         print(INFO_SAVED, p2)
+
+    p_rank = plot_f1_macro_ranking_all_combos(comparison_df, out_dir, show=show_plots)
+    if p_rank is not None:
+        print(INFO_SAVED, p_rank)
 
     return best_by_variant, best_by_model
 
