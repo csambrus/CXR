@@ -332,6 +332,9 @@ def run_multiple_models(
                 result_item = existing_result
                 print("[SKIP] Meglévő eredmény újrafelhasználva.")
             else:
+                # Per-run összefoglaló görbe: show_each_run + _plot_and_maybe_display_eval_png.
+                # Ne duplázzuk: run_training csak akkor plt.show, ha nincs futásonkénti megjelenítés.
+                train_show_plots = bool(show_plots and not show_each_run)
                 train_summary = run_training(
                     split_dir=split_dir,
                     out_dir=out_dir,
@@ -343,6 +346,7 @@ def run_multiple_models(
                     learning_rate_head=learning_rate_head,
                     learning_rate_finetune=learning_rate_finetune,
                     data_variant=data_variant,
+                    show_plots=train_show_plots,
                 )
                 eval_summary = run_evaluation(
                     model_path=train_summary["best_model_path"],

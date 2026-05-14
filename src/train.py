@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,79 @@ from src.config import (
 )
 from src.dataloader import build_datasets_from_split_csvs, build_default_augmentation
 from src.plot_utils import display_png_if_available, save_show_close_figure
+
+LATEST_TRAIN_STATE_KERAS = "latest_train_state.keras"
+TRAINING_RESUME_STATE_JSON = "training_resume_state.json"
+
+
+def _run_training_fingerprint(
+    *,
+    model_name: str,
+    data_variant: str,
+    split_dir: Path,
+    epochs_head: int,
+    epochs_finetune: int,
+    do_fine_tuning: bool,
+    pretrained: bool,
+) -> dict[str, Any]:
+    return {
+        "model_name": str(model_name),
+        "data_variant": str(data_variant),
+        "split_dir": str(split_dir.resolve()),
+        "epochs_head": int(epochs_head),
+        "epochs_finetune": int(epochs_finetune),
+        "do_fine_tuning": bool(do_fine_tuning),
+        "pretrained": bool(pretrained),
+    }
+
+
+def _fingerprints_equal(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    return a == b
+
+
+def _transfer_base_from_model(model: tf.keras.Model, model_name: str) -> tf.keras.Model | None:
+    if model_name.lower() == "baseline_cnn":
+        return None
+    try:
+        return model.get_layer(model_name.lower())
+    except ValueError:
+        return None
+
+
+class ResumeStateCallback(tf.keras.callbacks.Callback):
+    """Minden epoch végén JSON: folytatáshoz fingerprint + utolsó Keras epoch index."""
+
+    def __init__(
+        self,
+        state_path: Path,
+        fingerprint: dict[str, Any],
+        fit_tag: str,
+        epochs_cap_exclusive: int,
+    ) -> None:
+        super().__init__()
+        self.state_path = state_path
+        self.fingerprint = fingerprint
+        self.fit_tag = fit_tag
+        self.epochs_cap_exclusive = int(epochs_cap_exclusive)
+
+    def on_epoch_end(self, epoch: int, logs: dict[str, Any] | None = None) -> None:
+        logs = logs or {}
+        metrics = {}
+        for k, v in logs.items():
+            try:
+                metrics[k] = float(v)
+            except (TypeError, ValueError):
+                continue
+        save_json(
+            {
+                "fingerprint": self.fingerprint,
+                "fit_tag": self.fit_tag,
+                "last_completed_epoch": int(epoch),
+                "epochs_cap_exclusive": self.epochs_cap_exclusive,
+                "metrics": metrics,
+            },
+            self.state_path,
+        )
 
 
 # =========================================================
@@ -275,6 +349,10 @@ class ValidationClassificationMetrics(tf.keras.callbacks.Callback):
 def build_callbacks(
     out_dir: str | Path,
     val_ds: tf.data.Dataset | None = None,
+    *,
+    csv_append: bool = False,
+    resume_latest_path: Path | None = None,
+    resume_state: tuple[Path, dict[str, Any], str, int] | None = None,
 ) -> list[tf.keras.callbacks.Callback]:
     out_dir = Path(out_dir)
     ensure_dir(out_dir)
@@ -314,7 +392,22 @@ def build_callbacks(
             )
         )
 
-    callbacks.append(tf.keras.callbacks.CSVLogger(str(out_dir / "history.csv")))
+    callbacks.append(
+        tf.keras.callbacks.CSVLogger(str(out_dir / "history.csv"), append=csv_append)
+    )
+
+    if resume_latest_path is not None:
+        callbacks.append(
+            tf.keras.callbacks.ModelCheckpoint(
+                filepath=str(resume_latest_path),
+                save_best_only=False,
+                save_freq="epoch",
+                verbose=0,
+            )
+        )
+    if resume_state is not None:
+        st_path, fp, tag, cap = resume_state
+        callbacks.append(ResumeStateCallback(st_path, fp, tag, cap))
 
     return callbacks
 
@@ -483,7 +576,20 @@ def run_training(
     batch_size: int = BATCH_SIZE,
     image_size: tuple[int, int] = IMAGE_SIZE,
     show_plots: bool = True,
+    resume: bool = False,
 ) -> dict[str, Any]:
+    """
+    Tanítás + opcionális fine-tune.
+
+    **Megszakítás / folytatás:** minden epoch végén mentés: ``latest_train_state.keras`` és
+    ``training_resume_state.json`` (fingerprint + utolsó epoch index). A ``best_model.keras``
+    továbbra is a legjobb ``val_accuracy`` szerint frissül.
+
+    ``resume=True``: ha a fingerprint megegyezik és van checkpoint, folytatja a **head** fázist,
+    vagy — ha a head kész volt — betölti a modellt és elindítja a fine-tune-t. Részleges
+    fine-tune folytatás: a ``history.csv`` epoch oszlopa miatt korlátozott; ilyenkor a futás
+    a fine-tune fázist a Keras ``initial_epoch`` szerint próbálja folytatni.
+    """
     set_seed(SEED)
 
     if data_root is None:
@@ -493,6 +599,21 @@ def run_training(
     split_dir = Path(split_dir)
 
     model_out_dir = ensure_dir(Path(out_dir) / f"{model_name}_{data_variant}")
+    latest_path = model_out_dir / LATEST_TRAIN_STATE_KERAS
+    state_path = model_out_dir / TRAINING_RESUME_STATE_JSON
+    fp = _run_training_fingerprint(
+        model_name=model_name,
+        data_variant=data_variant,
+        split_dir=split_dir,
+        epochs_head=epochs_head,
+        epochs_finetune=epochs_finetune,
+        do_fine_tuning=do_fine_tuning,
+        pretrained=pretrained,
+    )
+
+    if not resume:
+        latest_path.unlink(missing_ok=True)
+        state_path.unlink(missing_ok=True)
 
     print("=" * 72)
     print("TRAINING")
@@ -505,6 +626,7 @@ def run_training(
     print("pretrained   :", pretrained)
     print("fine_tuning  :", do_fine_tuning)
     print("show_plots   :", show_plots)
+    print("resume       :", resume)
     print("=" * 72)
 
     augmentation = build_default_augmentation()
@@ -519,33 +641,116 @@ def run_training(
         channels=1,
     )
 
-    model, base_model = build_model(
-        model_name=model_name,
-        input_shape=(image_size[0], image_size[1], 1),
-        num_classes=NUM_CLASSES,
-        pretrained=pretrained,
+    model: tf.keras.Model | None = None
+    base_model: tf.keras.Model | None = None
+    head_initial_epoch = 0
+    head_csv_append = False
+    skip_head_fit = False
+    finetune_initial_epoch: int | None = None
+
+    if resume and latest_path.exists() and state_path.exists():
+        try:
+            prev = json.loads(state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            prev = {}
+        if not _fingerprints_equal(prev.get("fingerprint", {}), fp):
+            print("[WARN] resume: fingerprint nem egyezik; új futás indul.")
+            latest_path.unlink(missing_ok=True)
+            state_path.unlink(missing_ok=True)
+        else:
+            tag = str(prev.get("fit_tag", "head"))
+            last_e = int(prev.get("last_completed_epoch", -1))
+            if tag == "head":
+                next_e = last_e + 1
+                if next_e >= epochs_head:
+                    skip_head_fit = True
+                    print("[INFO] resume: fej fázis kész; modell betöltve, fine-tune következik.")
+                    model = tf.keras.models.load_model(latest_path, safe_mode=True)
+                    base_model = _transfer_base_from_model(model, model_name)
+                else:
+                    print(f"[INFO] resume: fej folytatása — Keras epoch {next_e} / {epochs_head}")
+                    model = tf.keras.models.load_model(latest_path, safe_mode=True)
+                    base_model = _transfer_base_from_model(model, model_name)
+                    head_initial_epoch = next_e
+                    head_csv_append = next_e > 0
+            elif tag == "finetune" and do_fine_tuning:
+                end_all = epochs_head + epochs_finetune
+                next_e = last_e + 1
+                if next_e >= end_all:
+                    print("[WARN] resume: fine-tune a state szerint kész; új futás.")
+                    latest_path.unlink(missing_ok=True)
+                    state_path.unlink(missing_ok=True)
+                else:
+                    skip_head_fit = True
+                    finetune_initial_epoch = next_e
+                    ft_csv_append = next_e > epochs_head
+                    print(f"[INFO] resume: fine-tune folytatása — Keras epoch {next_e} / {end_all}")
+                    model = tf.keras.models.load_model(latest_path, safe_mode=True)
+                    base_model = _transfer_base_from_model(model, model_name)
+            else:
+                print("[WARN] resume: ismeretlen fit_tag; új futás.")
+
+    if model is None:
+        model, base_model = build_model(
+            model_name=model_name,
+            input_shape=(image_size[0], image_size[1], 1),
+            num_classes=NUM_CLASSES,
+            pretrained=pretrained,
+        )
+
+    resume_state_head: tuple[Path, dict[str, Any], str, int] = (
+        state_path,
+        fp,
+        "head",
+        epochs_head,
     )
-
-    if base_model is not None:
-        base_model.trainable = False
-
-    compile_model(model, learning_rate=learning_rate_head)
-    callbacks = build_callbacks(model_out_dir, val_ds=val_ds)
+    resume_state_ft: tuple[Path, dict[str, Any], str, int] = (
+        state_path,
+        fp,
+        "finetune",
+        epochs_head + epochs_finetune,
+    )
 
     history_frames: list[pd.DataFrame] = []
 
-    history_head = model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=epochs_head,
-        callbacks=callbacks,
-        verbose=1,
-    )
+    if not skip_head_fit:
+        if base_model is not None:
+            base_model.trainable = False
+        compile_model(model, learning_rate_head)
+        callbacks = build_callbacks(
+            model_out_dir,
+            val_ds=val_ds,
+            csv_append=head_csv_append,
+            resume_latest_path=latest_path,
+            resume_state=resume_state_head,
+        )
 
-    head_df = pd.DataFrame(history_head.history)
-    head_df["phase"] = "head"
-    head_df["epoch_global"] = range(1, len(head_df) + 1)
-    history_frames.append(head_df)
+        history_head = model.fit(
+            train_ds,
+            validation_data=val_ds,
+            epochs=epochs_head,
+            initial_epoch=head_initial_epoch,
+            callbacks=callbacks,
+            verbose=1,
+        )
+
+        head_df = pd.DataFrame(history_head.history)
+        head_df["phase"] = "head"
+        head_df["epoch_global"] = range(1, len(head_df) + 1)
+        history_frames.append(head_df)
+    else:
+        hcsv = model_out_dir / "history.csv"
+        if not (hcsv.exists() and hcsv.stat().st_size > 0):
+            raise RuntimeError(
+                "[ERROR] resume: fej fázis kihagyva, de nincs érvényes history.csv — "
+                "nem lehet fine-tune-ot összerakni."
+            )
+        head_df = pd.read_csv(hcsv)
+        if "phase" not in head_df.columns:
+            head_df["phase"] = "head"
+        if "epoch_global" not in head_df.columns:
+            head_df["epoch_global"] = range(1, len(head_df) + 1)
+        history_frames.append(head_df)
 
     if do_fine_tuning and base_model is not None and epochs_finetune > 0:
         print("=" * 72)
@@ -562,25 +767,39 @@ def run_training(
                 if isinstance(layer, tf.keras.layers.BatchNormalization):
                     layer.trainable = False
 
-        compile_model(model, learning_rate=learning_rate_finetune)
-        callbacks = build_callbacks(model_out_dir, val_ds=val_ds)
+        compile_model(model, learning_rate_finetune)
+        ft_init = (
+            finetune_initial_epoch
+            if finetune_initial_epoch is not None
+            else epochs_head
+        )
+        ft_csv_append = (model_out_dir / "history.csv").exists()
+        callbacks = build_callbacks(
+            model_out_dir,
+            val_ds=val_ds,
+            csv_append=ft_csv_append,
+            resume_latest_path=latest_path,
+            resume_state=resume_state_ft,
+        )
 
         history_ft = model.fit(
             train_ds,
             validation_data=val_ds,
             epochs=epochs_head + epochs_finetune,
-            initial_epoch=epochs_head,
+            initial_epoch=ft_init,
             callbacks=callbacks,
             verbose=1,
         )
 
         ft_df = pd.DataFrame(history_ft.history)
         ft_df["phase"] = "finetune"
-        ft_df["epoch_global"] = range(
-            len(head_df) + 1,
-            len(head_df) + len(ft_df) + 1,
-        )
+        n_head = len(history_frames[0]) if history_frames else 0
+        ft_df["epoch_global"] = range(n_head + 1, n_head + len(ft_df) + 1)
         history_frames.append(ft_df)
+
+    history_frames = [df for df in history_frames if len(df) > 0]
+    if not history_frames:
+        raise RuntimeError("[ERROR] Nincs menthető training history sor.")
 
     history_df = pd.concat(history_frames, ignore_index=True)
 
@@ -603,6 +822,9 @@ def run_training(
     final_model_path = model_out_dir / "last_model.keras"
 
     model.save(final_model_path)
+
+    latest_path.unlink(missing_ok=True)
+    state_path.unlink(missing_ok=True)
 
     summary = {
         "model_name": model_name,

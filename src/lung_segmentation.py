@@ -668,7 +668,7 @@ def _history_to_dataframe(history: dict[str, list[float]] | pd.DataFrame) -> pd.
 def plot_segmentation_epoch_curves(
     history: dict[str, list[float]] | pd.DataFrame | None = None,
     out_dir: str | Path = SEG_MODEL_DIR,
-    show: bool = True,
+    show: bool = False,
 ) -> list[Path]:
     out_dir = ensure_dir(out_dir)
 
@@ -731,14 +731,17 @@ def train_segmentation(
     batch_size: int = BATCH_SIZE,
     overwrite: bool = False,
     force_retrain: bool = False,
-    show_plots: bool = True,
+    show_plots: bool = False,
 ) -> dict[str, list[float]]:
     """
     Trains the lung U-Net only if needed.
 
     Skips retraining when best_model.keras, history.csv and run_metadata.json exist,
     and the train/val/test split fingerprint plus core training parameters are unchanged.
-    Saved epoch plots are also shown inline in notebooks when show_plots=True.
+
+    Metrikánkénti görbék: csak ``training_curves/epoch_*.png`` mentés (alapból nincs ``plt.show``).
+    Egy sorban három panel: ``plot_training_history()`` külön hívás, vagy ``show_plots=True``
+    (akkor a tanítás végén egyszer megjelenik a kombinált ábra; a teljes pipeline ezt a végén hívja).
     """
     set_seed(SEED)
 
@@ -770,8 +773,10 @@ def train_segmentation(
         plot_segmentation_epoch_curves(
             history=history_dict,
             out_dir=out_dir,
-            show=show_plots,
+            show=False,
         )
+        if show_plots:
+            plot_training_history(show=True, save=True, out_dir=out_dir)
         return history_dict
 
     if overwrite or force_retrain:
@@ -846,8 +851,10 @@ def train_segmentation(
     plot_segmentation_epoch_curves(
         history=history_dict,
         out_dir=out_dir,
-        show=show_plots,
+        show=False,
     )
+    if show_plots:
+        plot_training_history(show=True, save=True, out_dir=out_dir)
 
     return history_dict
 
@@ -1362,7 +1369,7 @@ def run_full_segmentation_pipeline(
         batch_size=batch_size,
         overwrite=overwrite_training,
         force_retrain=force_retrain,
-        show_plots=show_plots,
+        show_plots=False,
     )
     test_metrics = evaluate_segmentation(batch_size=batch_size)
 
