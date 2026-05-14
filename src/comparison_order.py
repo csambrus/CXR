@@ -45,7 +45,8 @@ VAL_METRIC_HISTORY_KEYS: tuple[tuple[str, ...], ...] = (
     ("val_loss", "loss"),
     ("val_accuracy", "val_sparse_categorical_accuracy", "accuracy"),
     ("val_recall_macro", "recall_macro"),
-    ("val_roc_auc_macro_ovr", "roc_auc_macro_ovr"),
+    # train.py MacroAUCCallback → history.csv: val_auc_macro_ovr (és val_auc alias); régi név: val_roc_auc_macro_ovr
+    ("val_auc_macro_ovr", "val_roc_auc_macro_ovr", "roc_auc_macro_ovr", "val_auc"),
 )
 
 

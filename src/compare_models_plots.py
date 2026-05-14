@@ -314,7 +314,7 @@ def plot_training_history_for_row(row: pd.Series, out_dir: str | Path, show: boo
         (["loss"], "loss"),
         (["accuracy", "sparse_categorical_accuracy"], "Accuracy"),
         (["recall_macro", "macro_recall", "recall"], "Macro recall"),
-        (["roc_auc_macro_ovr", "macro_auc", "auc"], "ROC-AUC"),
+        (["roc_auc_macro_ovr", "auc_macro_ovr", "macro_auc", "auc"], "ROC-AUC"),
     ]:
         train_col, val_col, _ = _find_metric_pair(hist, names)
         if train_col or val_col:
