@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence, Any
+from typing import Any, Literal, Sequence
 import json
 import time
 import random
@@ -959,10 +959,16 @@ def plot_predictions(
     show: bool = True,
     save: bool = True,
     out_dir: str | Path = SEG_MODEL_DIR,
+    sample_order: Literal["random", "sequential"] = "random",
 ) -> Path | None:
     """
     Plots test image / true mask / predicted mask examples.
     Saves PNG and displays it inline in notebooks by default.
+
+    sample_order:
+        ``random`` — shuffle the test split then take ``n`` (default); shuffle uses
+        :data:`src.config.SEED` (``SEED`` env, default 42).
+        ``sequential`` — first ``n`` samples in split CSV order (former behaviour).
     """
     out_dir = ensure_dir(out_dir)
     model_path = Path(out_dir) / "best_model.keras"
@@ -978,7 +984,16 @@ def plot_predictions(
         },
     )
 
-    ds = build_dataset("test", batch_size=1).unbatch().take(n)
+    ds = build_dataset("test", batch_size=1).unbatch()
+    if sample_order == "random":
+        test_csv = SEGMENTATION_SPLITS_DIR / "test.csv"
+        test_len = len(pd.read_csv(test_csv))
+        shuffle_buf = max(n, min(test_len, 10_000))
+        ds = ds.shuffle(shuffle_buf, seed=SEED, reshuffle_each_iteration=False)
+    elif sample_order != "sequential":
+        raise ValueError(f"sample_order must be 'random' or 'sequential', got {sample_order!r}")
+
+    ds = ds.take(n)
 
     fig, axes = plt.subplots(n, 3, figsize=(10, 3 * n))
     if n == 1:
