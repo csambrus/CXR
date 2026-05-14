@@ -13,12 +13,13 @@ from src.compare_models_plots import (
     plot_epoch_comparisons,
     plot_training_history_for_row,
 )
+from src.comparison_order import COMPARISON_METRIC_COLUMNS, leaderboard_display_columns, METRIC_LABEL, reorder_comparison_df
 from src.config import MODELS_DIR, OUTPUT_DIR, ensure_dir, save_json
 from src.evaluate import run_evaluation
 from src.plot_utils import display_png_if_available
 from src.train import run_training
 
-DEFAULT_METRICS = ["accuracy", "recall_macro", "f1_macro", "roc_auc_macro_ovr", "loss"]
+DEFAULT_METRICS = list(COMPARISON_METRIC_COLUMNS)
 
 
 def _normalize_to_list(values: str | Iterable[str]) -> list[str]:
@@ -278,7 +279,7 @@ def compare_existing_results(
     comparison_df = comparison_df.sort_values(by=[c for c in ["f1_macro", "accuracy", "recall_macro"] if c in comparison_df.columns], ascending=False).reset_index(drop=True)
     comparison_df.to_csv(out_dir / "comparison.csv", index=False)
     save_json({"rows": comparison_df.to_dict(orient="records")}, out_dir / "comparison.json")
-    leaderboard_cols = [c for c in ["model_variant", "model", "data_variant", "accuracy", "f1_macro", "recall_macro", "roc_auc_macro_ovr", "loss"] if c in comparison_df.columns]
+    leaderboard_cols = leaderboard_display_columns(comparison_df)
     comparison_df[leaderboard_cols].to_csv(out_dir / "leaderboard.csv", index=False)
     if make_plots:
         plot_all_main_metrics(comparison_df, out_dir, show=show_plots)
@@ -290,7 +291,7 @@ def compare_existing_results(
 def run_multiple_models(
     split_dir: str | Path,
     out_dir: str | Path = MODELS_DIR,
-    model_names: str | Iterable[str] = ("baseline_cnn", "resnet50", "vgg16", "efficientnetb0"),
+    model_names: str | Iterable[str] = ("baseline_cnn", "efficientnetb0", "resnet50", "vgg16"),
     data_variants: str | Iterable[str] = ("raw",),
     pretrained: bool = True,
     do_fine_tuning: bool = False,
@@ -420,7 +421,7 @@ def load_metrics_from_model_dirs(
     out_dir = ensure_dir(Path(out_dir) / comparison_name)
     comparison_df.to_csv(out_dir / "comparison.csv", index=False)
     save_json({"rows": comparison_df.to_dict(orient="records")}, out_dir / "comparison.json")
-    leaderboard_cols = [c for c in ["model_variant", "model", "data_variant", "accuracy", "f1_macro", "recall_macro", "roc_auc_macro_ovr", "loss"] if c in comparison_df.columns]
+    leaderboard_cols = leaderboard_display_columns(comparison_df)
     comparison_df[leaderboard_cols].to_csv(out_dir / "leaderboard.csv", index=False)
     if make_plots:
         plot_all_main_metrics(comparison_df, out_dir, show=show_plots)
@@ -440,6 +441,7 @@ def load_metrics_from_comparison_csv(
         comparison_df = comparison_df.rename(columns={"model_name": "model"})
     if "model_variant" not in comparison_df.columns:
         comparison_df["model_variant"] = comparison_df["model"].astype(str) + "_" + comparison_df["data_variant"].astype(str)
+    comparison_df = reorder_comparison_df(comparison_df)
     out_dir = ensure_dir(out_dir)
     comparison_df.to_csv(out_dir / "comparison.csv", index=False)
     if make_plots:
@@ -453,8 +455,11 @@ def print_leaderboard(comparison_df: pd.DataFrame, top_k: int | None = None) -> 
     df = comparison_df.copy()
     if top_k is not None:
         df = df.head(top_k)
-    cols = [c for c in ["model_variant", "accuracy", "f1_macro", "recall_macro", "roc_auc_macro_ovr", "loss"] if c in df.columns]
+    df = reorder_comparison_df(df)
+    cols = leaderboard_display_columns(df)
+    rename = {**METRIC_LABEL, "f1_macro": "F1 macro"}
+    disp = df[cols].rename(columns={k: v for k, v in rename.items() if k in cols})
     print("\nLeaderboard")
     print("-" * 100)
-    print(df[cols].to_string(index=False))
+    print(disp.to_string(index=False))
     print("-" * 100)

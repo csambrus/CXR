@@ -30,6 +30,7 @@ from src.config import (
     save_json,
 )
 
+from src.plot_utils import save_show_close_figure
 from src.runtime import set_seed
 
 AUTOTUNE = tf.data.AUTOTUNE
@@ -1070,12 +1071,85 @@ def crop_to_mask(
     return crop
 
 
+def plot_classifier_variants_summary(
+    summary: dict[str, Any],
+    *,
+    out_dir: str | Path | None = None,
+    seg_test_metrics_path: str | Path | None = None,
+    show: bool = False,
+) -> Path | None:
+    """
+    A klasszifikátor-variáns generálás és (opcionálisan) a szegmentációs tesztmetrikák
+    rövid grafikus összefoglalója — a 2. szakasz lezárásához.
+    """
+    out_dir = ensure_dir(Path(out_dir) if out_dir is not None else SEGMENTATION_DATA_DIR / "classifier_variants_figs")
+    seg_path = Path(seg_test_metrics_path) if seg_test_metrics_path else SEG_MODEL_DIR / "test_metrics.json"
+    seg_metrics: dict[str, Any] | None = None
+    if seg_path.exists():
+        try:
+            with open(seg_path, "r", encoding="utf-8") as f:
+                seg_metrics = json.load(f)
+        except Exception:
+            seg_metrics = None
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.2))
+    labels = ["Új mentés", "Kihagyva (létező)", "Hibák"]
+    vals = [
+        int(summary.get("num_images_processed", 0) or 0),
+        int(summary.get("num_skipped_existing", 0) or 0),
+        int(summary.get("num_errors", 0) or 0),
+    ]
+    ax1.bar(labels, vals, color=["#27ae60", "#2980b9", "#c0392b"], edgecolor="black", linewidth=0.4)
+    ax1.set_ylabel("Képek száma")
+    ax1.set_title("Variáns képzés (maszk / masked / crop)")
+    ax1.grid(True, axis="y", alpha=0.3)
+    for i, v in enumerate(vals):
+        ax1.text(i, v, str(v), ha="center", va="bottom", fontsize=10)
+
+    ax2.axis("off")
+    lines = [
+        "2. szakasz — összefoglaló",
+        "",
+        f'Forrás képek: {summary.get("num_images_found", "?")}',
+        f'Új feldolgozva: {summary.get("num_images_processed", "?")}',
+        f'Kihagyva: {summary.get("num_skipped_existing", "?")}',
+        f'Hibák: {summary.get("num_errors", "?")}',
+        f'Idő: {summary.get("elapsed_seconds", 0):.1f} s',
+        "",
+        "Kimenetek: lung_masks, lung_masked, lung_crop",
+        f'Maszk: {summary.get("lung_mask_dir", "")}',
+        f'Maszkolt: {summary.get("lung_masked_dir", "")}',
+        f'Crop: {summary.get("lung_crop_dir", "")}',
+    ]
+    if seg_metrics:
+        lines.extend(["", "Szegmentáció (test):"])
+        for k in sorted(seg_metrics.keys())[:12]:
+            val = seg_metrics[k]
+            if isinstance(val, (float, int)) or hasattr(val, "item"):
+                try:
+                    fv = float(val)
+                    lines.append(f"  {k}: {fv:.4f}")
+                except Exception:
+                    lines.append(f"  {k}: {val}")
+            else:
+                lines.append(f"  {k}: {val}")
+    ax2.text(0.02, 0.98, "\n".join(lines), transform=ax2.transAxes, va="top", ha="left", fontsize=9, family="monospace")
+
+    fig.suptitle("Klasszifikációs adatvariánsok + szegmentációs kontextus", fontsize=13, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    save_path = out_dir / "classifier_variants_section2_summary.png"
+    save_show_close_figure(fig, save_path=save_path, show=show)
+    return save_path
+
+
 def generate_classifier_variants(
     source_root: str | Path = RAW_DIR,
     threshold: float = 0.5,
     crop_margin: int = 10,
     overwrite: bool = False,
     show_every: int = 250,
+    plot_summary: bool = True,
+    show_summary_plot: bool = False,
 ) -> dict[str, Any]:
     """
     Generates lung_masks / lung_masked / lung_crop from the classifier dataset.
@@ -1096,6 +1170,7 @@ def generate_classifier_variants(
 
     print("=" * 72)
     print("GENERATE CLASSIFIER VARIANTS")
+    print("(lung_masks, lung_masked, lung_crop)")
     print("=" * 72)
     print("source_root   :", source_root)
     print("num_images    :", len(image_files))
@@ -1172,6 +1247,16 @@ def generate_classifier_variants(
     }
     save_json(summary, SEGMENTATION_DATA_DIR / "classifier_variants_summary.json")
 
+    summary["summary_figure_path"] = None
+    if plot_summary:
+        try:
+            fig_path = plot_classifier_variants_summary(summary, show=show_summary_plot)
+            if fig_path is not None:
+                summary["summary_figure_path"] = str(fig_path)
+                print("[INFO] Összefoglaló ábra:", fig_path)
+        except Exception as e:
+            print("[WARN] plot_classifier_variants_summary:", e)
+
     print("\n" + "=" * 72)
     print("[OK] Generated classifier variants")
     print("=" * 72)
@@ -1192,23 +1277,6 @@ def generate_classifier_variants(
     print("=" * 72)
 
     return summary
-
-
-def generate_dataset_variants(
-    source_root: str | Path = RAW_DIR,
-    threshold: float = 0.5,
-    crop_margin: int = 10,
-    overwrite: bool = False,
-    show_every: int = 250,
-):
-    return generate_classifier_variants(
-        source_root=source_root,
-        threshold=threshold,
-        crop_margin=crop_margin,
-        overwrite=overwrite,
-        show_every=show_every,
-    )
-
 
 # =========================================================
 # Full pipeline

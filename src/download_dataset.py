@@ -265,6 +265,7 @@ def download_classifier_dataset(force: bool = False) -> None:
 
     tmp_dir = None
     try:
+        print(f"[INFO] Downloading classifier dataset from Kaggle: {COVID_CRD_SLUG}")
         cache_dir = CLASSIFIER_CACHE_DIR if IS_COLAB else None
         tmp_dir = _download_to_temp(COVID_CRD_SLUG, cache_dir=cache_dir)
         move_classifier_dataset(tmp_dir)
@@ -289,6 +290,7 @@ def download_segmentation_dataset(force: bool = False) -> None:
 
     tmp_dir = None
     try:
+        print(f"[INFO] Downloading segmentation dataset from Kaggle: {CRD_SEG_SLUG}")
         cache_dir = SEGMENTATION_CACHE_DIR if IS_COLAB else None
         tmp_dir = _download_to_temp(CRD_SEG_SLUG, cache_dir=cache_dir)
         move_segmentation_dataset(tmp_root=tmp_dir)

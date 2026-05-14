@@ -1,0 +1,13 @@
+Refactort kérek az egész projectre:
+- A generate_classifier_variants után legyen egy összefoglalás - akár grafikusan a klasszifikáció és variáns képzés eredményéről, lezárva a 2. szakaszt.
+- "Modellek összehasonlítása variánson belül": egy variánsoz tartozó külön metrikák ábrái llegyenek egy sorban!
+- a modellek itt egy ábrán belül legyenek külön színekkel
+- Szintén a "Variánsok összehasonlítása modellen belül": az ugyanazon modellhez tartozó metrikák legyenek egy sorban
+- a variánsok itt egy ábrán belül legyenek külön színekkel
+- minden ábrán és elemzésben a variánsok sorrnedje legyen ez: "raw", "crop", "masked"
+- minden ábrán és elmezésben a modellek sorrendje legyen ez: "baseline_cnn", "efficientnet_b0", "resnet_50", "vgg_16"
+- minden ábrán és elemzésben a metrikák sorrendje legyen ez: "loss", "Accuracy", "Macro recall", "ROC-AUC" - ez most is így van.
+- A report_best_models a táblázat után grafikusan is legyen támogatva
+
+
+

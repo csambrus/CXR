@@ -13,6 +13,8 @@ from src.compare_models import (
     print_leaderboard,
     run_multiple_models,
 )
+from src.compare_models_plots import plot_report_best_models
+from src.comparison_order import reorder_comparison_df
 from src.config import MODELS_DIR, ensure_dir, save_json
 
 INFO_SAVED = "[INFO] Saved:"
@@ -34,6 +36,30 @@ class ModelRunConfig:
 
 def get_default_model_run_configs(data_variants: list[str]) -> list[ModelRunConfig]:
     return [
+        ModelRunConfig(
+            label="baseline_cnn_optimized",
+            model_names=["baseline_cnn"],
+            data_variants=data_variants,
+            pretrained=False,
+            do_fine_tuning=False,
+            epochs_head=18,
+            epochs_finetune=0,
+            learning_rate_head=1e-3,
+            learning_rate_finetune=1e-5,
+            comparison_name="baseline_cnn_optimized",
+        ),
+        ModelRunConfig(
+            label="efficientnetb0_fixed_optimized",
+            model_names=["efficientnetb0"],
+            data_variants=data_variants,
+            pretrained=True,
+            do_fine_tuning=True,
+            epochs_head=12,
+            epochs_finetune=12,
+            learning_rate_head=3e-4,
+            learning_rate_finetune=3e-6,
+            comparison_name="efficientnetb0_fixed_optimized",
+        ),
         ModelRunConfig(
             label="resnet50_optimized",
             model_names=["resnet50"],
@@ -57,30 +83,6 @@ def get_default_model_run_configs(data_variants: list[str]) -> list[ModelRunConf
             learning_rate_head=5e-4,
             learning_rate_finetune=1e-5,
             comparison_name="vgg16_optimized",
-        ),
-        ModelRunConfig(
-            label="efficientnetb0_fixed_optimized",
-            model_names=["efficientnetb0"],
-            data_variants=data_variants,
-            pretrained=True,
-            do_fine_tuning=True,
-            epochs_head=12,
-            epochs_finetune=12,
-            learning_rate_head=3e-4,
-            learning_rate_finetune=3e-6,
-            comparison_name="efficientnetb0_fixed_optimized",
-        ),
-        ModelRunConfig(
-            label="baseline_cnn_optimized",
-            model_names=["baseline_cnn"],
-            data_variants=data_variants,
-            pretrained=False,
-            do_fine_tuning=False,
-            epochs_head=18,
-            epochs_finetune=0,
-            learning_rate_head=1e-3,
-            learning_rate_finetune=1e-5,
-            comparison_name="baseline_cnn_optimized",
         ),
     ]
 
@@ -141,9 +143,8 @@ def build_final_comparison(
     comparison_df = (
         model_results_df
         .drop_duplicates(subset=["model", "data_variant"], keep="last")
-        .sort_values(["f1_macro", "accuracy", "recall_macro"], ascending=False)
-        .reset_index(drop=True)
     )
+    comparison_df = reorder_comparison_df(comparison_df)
 
     comparison_csv = final_out_dir / "comparison.csv"
     leaderboard_csv = final_out_dir / "leaderboard.csv"
@@ -185,7 +186,12 @@ def generate_final_plots(comparison_df: pd.DataFrame, out_dir: str | Path, show:
     plot_epoch_comparisons(comparison_df, out_dir, show=show)
 
 
-def report_best_models(comparison_df: pd.DataFrame, out_dir: str | Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+def report_best_models(
+    comparison_df: pd.DataFrame,
+    out_dir: str | Path,
+    *,
+    show_plots: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     out_dir = ensure_dir(out_dir)
 
     best_by_variant = (
@@ -198,9 +204,17 @@ def report_best_models(comparison_df: pd.DataFrame, out_dir: str | Path) -> tupl
         .groupby("model", as_index=False)
         .first()
     )
+    best_by_variant = reorder_comparison_df(best_by_variant)
+    best_by_model = reorder_comparison_df(best_by_model)
 
     best_by_variant.to_csv(Path(out_dir) / "best_by_variant.csv", index=False)
     best_by_model.to_csv(Path(out_dir) / "best_by_model.csv", index=False)
+
+    p1, p2 = plot_report_best_models(best_by_variant, best_by_model, out_dir, show=show_plots)
+    if p1 is not None:
+        print(INFO_SAVED, p1)
+    if p2 is not None:
+        print(INFO_SAVED, p2)
 
     return best_by_variant, best_by_model
 
