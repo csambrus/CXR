@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import shutil
+import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import kagglehub
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
 from src.config import GDRIVE_DATA, IS_COLAB, RAW_DIR, SEGMENTATION_RAW_DIR, ensure_dir
 
@@ -46,19 +48,24 @@ def remove_if_exists(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-def _collect_merge_copy_jobs(src: Path, dst: Path) -> list[tuple[Path, Path]]:
-    """Összegyűjti a merge-szerű másoláshoz szükséges (forrás, cél) fájlpárokat."""
-    jobs: list[tuple[Path, Path]] = []
+def _iter_merge_copy_jobs(src: Path, dst: Path) -> Iterator[tuple[Path, Path]]:
+    """
+    Soronként adja a másolandó (forrás, cél) párokat — nem épít memóriában
+    teljes listát (nagy fáknál ez percekig „néma” volt a régi megoldásnál).
+    """
     if not src.is_dir():
-        return jobs
+        return
     dst.mkdir(parents=True, exist_ok=True)
-    for item in src.iterdir():
+    try:
+        items = sorted(src.iterdir())
+    except OSError:
+        return
+    for item in items:
         target = dst / item.name
         if item.is_dir():
-            jobs.extend(_collect_merge_copy_jobs(item, target))
+            yield from _iter_merge_copy_jobs(item, target)
         elif not target.exists():
-            jobs.append((item, target))
-    return jobs
+            yield (item, target)
 
 
 def copytree_merge(
@@ -73,14 +80,21 @@ def copytree_merge(
     Ha a cél nem létezik, simán másol.
     Ha létezik, a hiányzó fájlokat/mappákat belemozgatja.
 
-    Nagy dataseteknél a fájlmásolás ideje dominál — opcionális tqdm fájlonként.
+    Haladás: generátor + tqdm (stdout, nem notebook widget) — az első
+    másolásnál azonnal látszik a sáv; nincs előzetes teljes fasor bejárás.
     """
-    jobs = _collect_merge_copy_jobs(src, dst)
-    if not jobs:
-        return
+    jobs = _iter_merge_copy_jobs(src, dst)
     label = desc or f"Copy {src.name}"
-    iterator = tqdm(jobs, desc=label, unit="file") if show_progress else jobs
-    for s_path, t_path in iterator:
+    if show_progress:
+        jobs = tqdm(
+            jobs,
+            desc=label,
+            unit="file",
+            file=sys.stdout,
+            mininterval=0.25,
+            dynamic_ncols=True,
+        )
+    for s_path, t_path in jobs:
         t_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(s_path, t_path)
 
@@ -242,12 +256,13 @@ def _download_to_temp(slug: str, cache_dir: Path | None = None) -> Path:
         ensure_dir(cache_dir)
 
         if _has_any_files(cache_dir):
-            print(f"[INFO] Using cached dataset from Drive: {cache_dir}")
+            print(f"[INFO] Using cached dataset from Drive: {cache_dir}", flush=True)
             source_root = cache_dir
         else:
             downloaded_path = Path(kagglehub.dataset_download(slug))
-            print(f"[INFO] KaggleHub downloaded/cached at: {downloaded_path}")
-            print(f"[INFO] Caching dataset into Drive: {cache_dir}")
+            print(f"[INFO] KaggleHub downloaded/cached at: {downloaded_path}", flush=True)
+            print(f"[INFO] Caching dataset into Drive: {cache_dir}", flush=True)
+            print("[INFO] Copying to Drive cache (streaming file progress)...", flush=True)
 
             if downloaded_path.is_dir():
                 copytree_merge(
@@ -261,7 +276,7 @@ def _download_to_temp(slug: str, cache_dir: Path | None = None) -> Path:
             source_root = cache_dir
     else:
         downloaded_path = Path(kagglehub.dataset_download(slug))
-        print(f"[INFO] KaggleHub downloaded/cached at: {downloaded_path}")
+        print(f"[INFO] KaggleHub downloaded/cached at: {downloaded_path}", flush=True)
 
         if not downloaded_path.is_dir():
             raise RuntimeError(f"[ERROR] Downloaded path is not a directory: {downloaded_path}")
@@ -269,7 +284,12 @@ def _download_to_temp(slug: str, cache_dir: Path | None = None) -> Path:
         source_root = downloaded_path
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="cxr_download_"))
-    print(f"[INFO] Temporary working dir: {tmp_dir}")
+    print(f"[INFO] Temporary working dir: {tmp_dir}", flush=True)
+    print(
+        "[INFO] Copying into temp dir (streaming; first progress line may take "
+        "a few seconds while entering the first subfolder)...",
+        flush=True,
+    )
 
     copytree_merge(source_root, tmp_dir, desc="Copy dataset → temp dir")
 
