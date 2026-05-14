@@ -1092,35 +1092,71 @@ def plot_classifier_variants_summary(
         except Exception:
             seg_metrics = None
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.2))
-    labels = ["Új mentés", "Kihagyva (létező)", "Hibák"]
-    vals = [
-        int(summary.get("num_images_processed", 0) or 0),
-        int(summary.get("num_skipped_existing", 0) or 0),
-        int(summary.get("num_errors", 0) or 0),
-    ]
-    ax1.bar(labels, vals, color=["#27ae60", "#2980b9", "#c0392b"], edgecolor="black", linewidth=0.4)
-    ax1.set_ylabel("Képek száma")
-    ax1.set_title("Variáns képzés (maszk / masked / crop)")
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.5, 4.2))
+    nm = summary.get("num_new_mask")
+    nmd = summary.get("num_new_masked")
+    nc = summary.get("num_new_crop")
+    if nm is not None and nmd is not None and nc is not None:
+        labels = [
+            "Új: maszk",
+            "Új: masked",
+            "Új: crop",
+            "Kihagyva (létező)",
+            "Hibák",
+        ]
+        vals = [
+            int(nm or 0),
+            int(nmd or 0),
+            int(nc or 0),
+            int(summary.get("num_skipped_existing", 0) or 0),
+            int(summary.get("num_errors", 0) or 0),
+        ]
+        colors = ["#1e8449", "#27ae60", "#58d68d", "#2980b9", "#c0392b"]
+    else:
+        labels = ["Új mentés", "Kihagyva (létező)", "Hibák"]
+        vals = [
+            int(summary.get("num_images_processed", 0) or 0),
+            int(summary.get("num_skipped_existing", 0) or 0),
+            int(summary.get("num_errors", 0) or 0),
+        ]
+        colors = ["#27ae60", "#2980b9", "#c0392b"]
+    ax1.bar(labels, vals, color=colors, edgecolor="black", linewidth=0.4)
+    ax1.set_ylabel("Darab (fájl / kép)")
+    ax1.set_title("Variáns képzés — új mentések típusonként")
     ax1.grid(True, axis="y", alpha=0.3)
+    ax1.tick_params(axis="x", rotation=18)
     for i, v in enumerate(vals):
-        ax1.text(i, v, str(v), ha="center", va="bottom", fontsize=10)
+        ax1.text(i, v, str(v), ha="center", va="bottom", fontsize=9)
 
     ax2.axis("off")
     lines = [
         "2. szakasz — összefoglaló",
         "",
         f'Forrás képek: {summary.get("num_images_found", "?")}',
-        f'Új feldolgozva: {summary.get("num_images_processed", "?")}',
-        f'Kihagyva: {summary.get("num_skipped_existing", "?")}',
-        f'Hibák: {summary.get("num_errors", "?")}',
-        f'Idő: {summary.get("elapsed_seconds", 0):.1f} s',
-        "",
-        "Kimenetek: lung_masks, lung_masked, lung_crop",
-        f'Maszk: {summary.get("lung_mask_dir", "")}',
-        f'Maszkolt: {summary.get("lung_masked_dir", "")}',
-        f'Crop: {summary.get("lung_crop_dir", "")}',
     ]
+    if summary.get("num_new_mask") is not None:
+        lines.extend(
+            [
+                f'Képek frissítve (≥1 új fájl): {summary.get("num_images_processed", "?")}',
+                f'  → új maszk fájl: {summary.get("num_new_mask", "?")}',
+                f'  → új masked fájl: {summary.get("num_new_masked", "?")}',
+                f'  → új crop fájl: {summary.get("num_new_crop", "?")}',
+            ]
+        )
+    else:
+        lines.append(f'Új feldolgozva (képek): {summary.get("num_images_processed", "?")}')
+    lines.extend(
+        [
+            f'Kihagyva: {summary.get("num_skipped_existing", "?")}',
+            f'Hibák: {summary.get("num_errors", "?")}',
+            f'Idő: {summary.get("elapsed_seconds", 0):.1f} s',
+            "",
+            "Kimenetek: lung_masks, lung_masked, lung_crop",
+            f'Maszk: {summary.get("lung_mask_dir", "")}',
+            f'Maszkolt: {summary.get("lung_masked_dir", "")}',
+            f'Crop: {summary.get("lung_crop_dir", "")}',
+        ]
+    )
     if seg_metrics:
         lines.extend(["", "Szegmentáció (test):"])
         for k in sorted(seg_metrics.keys())[:12]:
@@ -1152,7 +1188,11 @@ def generate_classifier_variants(
     show_summary_plot: bool = False,
 ) -> dict[str, Any]:
     """
-    Generates lung_masks / lung_masked / lung_crop from the classifier dataset.
+    A klasszifikátoros nyers képekből három kimenetet készít: maszk, maszkolt, crop.
+
+    Képenként külön dönti el, melyik kimenet hiányzik (vagy ``overwrite`` esetén
+    mindet újraírja). Így részleges készlet / megszakadt futás után is folytatható,
+    és az összefoglaló ábrán külön látszik, hány **fájl** ment el típusonként.
     """
     source_root = Path(source_root)
     if not source_root.exists():
@@ -1183,6 +1223,9 @@ def generate_classifier_variants(
     count = 0
     skipped_existing = 0
     errors = 0
+    saved_mask = 0
+    saved_masked = 0
+    saved_crop = 0
     error_examples: list[str] = []
 
     start_time = time.time()
@@ -1197,7 +1240,11 @@ def generate_classifier_variants(
         out_masked = LUNG_MASKED_DIR / rel
         out_crop = LUNG_CROP_DIR / rel
 
-        if not overwrite and out_mask.exists() and out_masked.exists() and out_crop.exists():
+        need_mask = overwrite or not out_mask.exists()
+        need_masked = overwrite or not out_masked.exists()
+        need_crop = overwrite or not out_crop.exists()
+
+        if not need_mask and not need_masked and not need_crop:
             skipped_existing += 1
             continue
 
@@ -1208,9 +1255,15 @@ def generate_classifier_variants(
             masked = apply_mask(img, mask)
             crop = crop_to_mask(img, mask, margin=crop_margin)
 
-            save_gray(mask, out_mask)
-            save_gray(masked, out_masked)
-            save_gray(crop, out_crop)
+            if need_mask:
+                save_gray(mask, out_mask)
+                saved_mask += 1
+            if need_masked:
+                save_gray(masked, out_masked)
+                saved_masked += 1
+            if need_crop:
+                save_gray(crop, out_crop)
+                saved_crop += 1
 
             count += 1
         except Exception as e:
@@ -1223,7 +1276,9 @@ def generate_classifier_variants(
             rate = idx / elapsed if elapsed > 0 else 0.0
             print(
                 f"[INFO] processed={idx}/{len(image_files)} | "
-                f"saved={count} | skipped_existing={skipped_existing} | "
+                f"images_saved={count} | +mask/+masked/+crop="
+                f"{saved_mask}/{saved_masked}/{saved_crop} | "
+                f"skipped_existing={skipped_existing} | "
                 f"errors={errors} | {rate:.1f} img/s"
             )
 
@@ -1233,6 +1288,9 @@ def generate_classifier_variants(
         "source_root": str(source_root),
         "num_images_found": len(image_files),
         "num_images_processed": count,
+        "num_new_mask": saved_mask,
+        "num_new_masked": saved_masked,
+        "num_new_crop": saved_crop,
         "num_skipped_existing": skipped_existing,
         "num_errors": errors,
         "lung_mask_dir": str(LUNG_MASK_DIR),
@@ -1261,7 +1319,10 @@ def generate_classifier_variants(
     print("[OK] Generated classifier variants")
     print("=" * 72)
     print("images found       :", len(image_files))
-    print("newly saved        :", count)
+    print("images saved (≥1)  :", count)
+    print("  new mask files   :", saved_mask)
+    print("  new masked files :", saved_masked)
+    print("  new crop files   :", saved_crop)
     print("skipped existing   :", skipped_existing)
     print("errors             :", errors)
     print("lung_mask_dir      :", LUNG_MASK_DIR)
