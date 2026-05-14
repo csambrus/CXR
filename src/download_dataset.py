@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import sys
 import tempfile
+import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -31,6 +32,10 @@ DRIVE_CACHE_ROOT = GDRIVE_DATA / "download_cache"
 CLASSIFIER_CACHE_DIR = DRIVE_CACHE_ROOT / "classifier_dataset"
 SEGMENTATION_CACHE_DIR = DRIVE_CACHE_ROOT / "segmentation_dataset"
 
+# Colab: egy zip a Drive-on (kisméretű meta + kevés nagy I/O), nem több tízezer kis fájl másolása.
+CLASSIFIER_ARCHIVE_ZIP = DRIVE_CACHE_ROOT / "classifier_unaissait_curated_cxr.zip"
+SEGMENTATION_ARCHIVE_ZIP = DRIVE_CACHE_ROOT / "segmentation_mrunalnshah_crd.zip"
+
 
 # =========================================================
 # Általános utilok
@@ -46,6 +51,72 @@ def remove_if_exists(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
     elif path.exists():
         path.unlink(missing_ok=True)
+
+
+def _copy_large_file(src: Path, dst: Path, *, desc: str) -> None:
+    """Egy nagy fájl másolása chunkokban tqdm mérettel (Drive ↔ helyi)."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    size = max(src.stat().st_size, 1)
+    chunk = 1024 * 1024 * 16
+    with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+        with tqdm(
+            total=size,
+            desc=desc,
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+            file=sys.stdout,
+            mininterval=0.25,
+        ) as bar:
+            while True:
+                buf = fsrc.read(chunk)
+                if not buf:
+                    break
+                fdst.write(buf)
+                bar.update(len(buf))
+
+
+def _zip_directory_tree(src: Path, out_zip: Path, *, desc: str) -> None:
+    """
+    A teljes forrásfa egy zipbe. ZIP_STORED: PNG/JPEG úgysem tömörít sokat,
+    a DEFLATED CPU+idő drága lenne.
+    """
+    files: list[tuple[Path, str]] = []
+    for p in sorted(src.rglob("*")):
+        if p.is_file():
+            files.append((p, str(p.relative_to(src))))
+    out_zip.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_STORED) as zf:
+        for path, arcname in tqdm(
+            files,
+            desc=desc,
+            unit="file",
+            file=sys.stdout,
+            mininterval=0.2,
+        ):
+            zf.write(path, arcname=arcname)
+
+
+def _unzip_to_dir(zip_path: Path, dest_dir: Path, *, desc: str) -> None:
+    dest_dir = dest_dir.resolve()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        members = zf.infolist()
+        for info in tqdm(
+            members,
+            desc=desc,
+            unit="file",
+            file=sys.stdout,
+            mininterval=0.15,
+        ):
+            if info.is_dir():
+                continue
+            target = (dest_dir / info.filename).resolve()
+            try:
+                target.relative_to(dest_dir)
+            except ValueError as e:
+                raise RuntimeError(f"[ERROR] Illegal zip path: {info.filename!r}") from e
+            zf.extract(info, path=dest_dir)
 
 
 def _iter_merge_copy_jobs(src: Path, dst: Path) -> Iterator[tuple[Path, Path]]:
@@ -243,57 +314,109 @@ def move_segmentation_dataset(
 # Letöltés
 # =========================================================
 
-def _download_to_temp(slug: str, cache_dir: Path | None = None) -> Path:
+def _download_to_temp(
+    slug: str,
+    cache_dir: Path | None = None,
+    drive_archive_zip: Path | None = None,
+) -> Path:
     """
-    KaggleHub letöltés temp helyre.
-    A kagglehub.dataset_download egy cache-elt lokációt ad vissza.
-    Innen egy ideiglenes munkakönyvtárba másolunk, hogy biztonságosan
-    tudjunk move-olni.
-    """
-    source_root: Path
+    Ideiglenes könyvtár, ahonnan a ``move_*`` függvények a RAW struktúrába mozgatnak.
 
-    if cache_dir is not None:
+    Colab + ``drive_archive_zip``: egy zip a Drive-on → egy nagy fájl másolása +
+    helyi kicsomagolás (sokkal kevesebb kis fájl I/O a Drive-on, mint a régi
+    mappa-cache). Első futás: KaggleHub letöltés → helyi zip → Drive-ra egy
+    ``copy`` → kicsomagolás a tempbe.
+
+    Ha még a régi, kibontott ``cache_dir`` létezik zip nélkül, arról továbbra is
+    működik a fájlmásolás (lassabb útvonal).
+    """
+    tmp_work = Path(tempfile.mkdtemp(prefix="cxr_download_"))
+    print(f"[INFO] Temporary working dir: {tmp_work}", flush=True)
+
+    if cache_dir is not None and drive_archive_zip is not None:
+        ensure_dir(DRIVE_CACHE_ROOT)
         ensure_dir(cache_dir)
 
+        if drive_archive_zip.exists():
+            print(
+                f"[INFO] Using Drive zip archive (single-file copy): {drive_archive_zip}",
+                flush=True,
+            )
+            staging = tmp_work / "drive_dataset.zip"
+            _copy_large_file(
+                drive_archive_zip,
+                staging,
+                desc="Copy zip ← Drive",
+            )
+            print("[INFO] Extracting archive under temp dir...", flush=True)
+            _unzip_to_dir(staging, tmp_work, desc="Unzip dataset")
+            staging.unlink(missing_ok=True)
+            return tmp_work
+
         if _has_any_files(cache_dir):
-            print(f"[INFO] Using cached dataset from Drive: {cache_dir}", flush=True)
-            source_root = cache_dir
-        else:
-            downloaded_path = Path(kagglehub.dataset_download(slug))
-            print(f"[INFO] KaggleHub downloaded/cached at: {downloaded_path}", flush=True)
-            print(f"[INFO] Caching dataset into Drive: {cache_dir}", flush=True)
-            print("[INFO] Copying to Drive cache (streaming file progress)...", flush=True)
+            print(
+                f"[INFO] Legacy folder cache on Drive (many small files): {cache_dir}",
+                flush=True,
+            )
+            print(
+                "[INFO] Copying to temp (slow on Drive). "
+                "Optional: remove this folder so the next run uses a .zip cache only.",
+                flush=True,
+            )
+            copytree_merge(
+                cache_dir,
+                tmp_work,
+                desc="Copy dataset folder → temp",
+            )
+            return tmp_work
 
-            if downloaded_path.is_dir():
-                copytree_merge(
-                    downloaded_path,
-                    cache_dir,
-                    desc="Copy dataset → Drive cache",
-                )
-            else:
-                raise RuntimeError(f"[ERROR] Downloaded path is not a directory: {downloaded_path}")
-
-            source_root = cache_dir
-    else:
         downloaded_path = Path(kagglehub.dataset_download(slug))
-        print(f"[INFO] KaggleHub downloaded/cached at: {downloaded_path}", flush=True)
-
+        print(f"[INFO] KaggleHub path: {downloaded_path}", flush=True)
         if not downloaded_path.is_dir():
-            raise RuntimeError(f"[ERROR] Downloaded path is not a directory: {downloaded_path}")
+            raise RuntimeError(
+                f"[ERROR] Downloaded path is not a directory: {downloaded_path}"
+            )
 
-        source_root = downloaded_path
+        staging_zip = tmp_work / ".staging.zip"
+        print(
+            "[INFO] Building local zip (STORE); then one upload to Drive…",
+            flush=True,
+        )
+        _zip_directory_tree(
+            downloaded_path,
+            staging_zip,
+            desc="Zip dataset (local, STORED)",
+        )
+        print(f"[INFO] Saving archive to Drive: {drive_archive_zip}", flush=True)
+        ensure_dir(drive_archive_zip.parent)
+        _copy_large_file(
+            staging_zip,
+            drive_archive_zip,
+            desc="Copy zip → Drive",
+        )
+        print("[INFO] Extracting for install/move step…", flush=True)
+        _unzip_to_dir(staging_zip, tmp_work, desc="Unzip dataset")
+        staging_zip.unlink(missing_ok=True)
+        return tmp_work
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="cxr_download_"))
-    print(f"[INFO] Temporary working dir: {tmp_dir}", flush=True)
+    downloaded_path = Path(kagglehub.dataset_download(slug))
+    print(f"[INFO] KaggleHub downloaded/cached at: {downloaded_path}", flush=True)
+
+    if not downloaded_path.is_dir():
+        raise RuntimeError(
+            f"[ERROR] Downloaded path is not a directory: {downloaded_path}"
+        )
+
     print(
-        "[INFO] Copying into temp dir (streaming; first progress line may take "
-        "a few seconds while entering the first subfolder)...",
+        "[INFO] Copying into temp dir (streaming; may take a while on slow disks)…",
         flush=True,
     )
-
-    copytree_merge(source_root, tmp_dir, desc="Copy dataset → temp dir")
-
-    return tmp_dir
+    copytree_merge(
+        downloaded_path,
+        tmp_work,
+        desc="Copy dataset → temp dir",
+    )
+    return tmp_work
 
 
 def download_classifier_dataset(force: bool = False) -> None:
@@ -308,12 +431,18 @@ def download_classifier_dataset(force: bool = False) -> None:
         remove_if_exists(COVID_READY_MARKER)
         if IS_COLAB:
             remove_if_exists(CLASSIFIER_CACHE_DIR)
+            remove_if_exists(CLASSIFIER_ARCHIVE_ZIP)
 
     tmp_dir = None
     try:
         print(f"[INFO] Downloading classifier dataset from Kaggle: {COVID_CRD_SLUG}")
         cache_dir = CLASSIFIER_CACHE_DIR if IS_COLAB else None
-        tmp_dir = _download_to_temp(COVID_CRD_SLUG, cache_dir=cache_dir)
+        zip_path = CLASSIFIER_ARCHIVE_ZIP if IS_COLAB else None
+        tmp_dir = _download_to_temp(
+            COVID_CRD_SLUG,
+            cache_dir=cache_dir,
+            drive_archive_zip=zip_path,
+        )
         move_classifier_dataset(tmp_dir)
         print("[OK] Classifier dataset ready.")
     finally:
@@ -333,12 +462,18 @@ def download_segmentation_dataset(force: bool = False) -> None:
         remove_if_exists(SEG_READY_MARKER)
         if IS_COLAB:
             remove_if_exists(SEGMENTATION_CACHE_DIR)
+            remove_if_exists(SEGMENTATION_ARCHIVE_ZIP)
 
     tmp_dir = None
     try:
         print(f"[INFO] Downloading segmentation dataset from Kaggle: {CRD_SEG_SLUG}")
         cache_dir = SEGMENTATION_CACHE_DIR if IS_COLAB else None
-        tmp_dir = _download_to_temp(CRD_SEG_SLUG, cache_dir=cache_dir)
+        zip_path = SEGMENTATION_ARCHIVE_ZIP if IS_COLAB else None
+        tmp_dir = _download_to_temp(
+            CRD_SEG_SLUG,
+            cache_dir=cache_dir,
+            drive_archive_zip=zip_path,
+        )
         move_segmentation_dataset(tmp_root=tmp_dir)
         print("[OK] Segmentation dataset ready.")
     finally:
@@ -346,9 +481,9 @@ def download_segmentation_dataset(force: bool = False) -> None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def download_all_datasets() -> None:
-    download_classifier_dataset()
-    download_segmentation_dataset()
+def download_all_datasets(force: bool = False) -> None:
+    download_classifier_dataset(force=force)
+    download_segmentation_dataset(force=force)
 
 
 # =========================================================
