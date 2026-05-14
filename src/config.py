@@ -111,6 +111,9 @@ EPOCHS = int(os.environ.get("EPOCHS", "15"))
 BATCH_SIZE =128
 CACHE_DATASET = True
 
+# tf.data cache kitöltésekor batch-szintű tqdm (train/val/test). CXR_SHOW_CACHE_PROGRESS=0 kikapcsolja.
+SHOW_DATASET_CACHE_PROGRESS = os.environ.get("CXR_SHOW_CACHE_PROGRESS", "1") != "0"
+
 PLOT_DPI = 150
 # =========================================================
 # Utilities

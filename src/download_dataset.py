@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 import kagglehub
+from tqdm.auto import tqdm
 
 from src.config import GDRIVE_DATA, IS_COLAB, RAW_DIR, SEGMENTATION_RAW_DIR, ensure_dir
 
@@ -45,22 +46,43 @@ def remove_if_exists(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-def copytree_merge(src: Path, dst: Path) -> None:
+def _collect_merge_copy_jobs(src: Path, dst: Path) -> list[tuple[Path, Path]]:
+    """Összegyűjti a merge-szerű másoláshoz szükséges (forrás, cél) fájlpárokat."""
+    jobs: list[tuple[Path, Path]] = []
+    if not src.is_dir():
+        return jobs
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        target = dst / item.name
+        if item.is_dir():
+            jobs.extend(_collect_merge_copy_jobs(item, target))
+        elif not target.exists():
+            jobs.append((item, target))
+    return jobs
+
+
+def copytree_merge(
+    src: Path,
+    dst: Path,
+    *,
+    show_progress: bool = True,
+    desc: str | None = None,
+) -> None:
     """
     Python 3.8+ kompatibilis merge-szerű másolás.
     Ha a cél nem létezik, simán másol.
     Ha létezik, a hiányzó fájlokat/mappákat belemozgatja.
-    """
-    dst.mkdir(parents=True, exist_ok=True)
 
-    for item in src.iterdir():
-        target = dst / item.name
-        if item.is_dir():
-            copytree_merge(item, target)
-        else:
-            if target.exists():
-                continue
-            shutil.copy2(item, target)
+    Nagy dataseteknél a fájlmásolás ideje dominál — opcionális tqdm fájlonként.
+    """
+    jobs = _collect_merge_copy_jobs(src, dst)
+    if not jobs:
+        return
+    label = desc or f"Copy {src.name}"
+    iterator = tqdm(jobs, desc=label, unit="file") if show_progress else jobs
+    for s_path, t_path in iterator:
+        t_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(s_path, t_path)
 
 
 def _has_any_files(path: Path) -> bool:
@@ -228,7 +250,11 @@ def _download_to_temp(slug: str, cache_dir: Path | None = None) -> Path:
             print(f"[INFO] Caching dataset into Drive: {cache_dir}")
 
             if downloaded_path.is_dir():
-                copytree_merge(downloaded_path, cache_dir)
+                copytree_merge(
+                    downloaded_path,
+                    cache_dir,
+                    desc="Copy dataset → Drive cache",
+                )
             else:
                 raise RuntimeError(f"[ERROR] Downloaded path is not a directory: {downloaded_path}")
 
@@ -245,7 +271,7 @@ def _download_to_temp(slug: str, cache_dir: Path | None = None) -> Path:
     tmp_dir = Path(tempfile.mkdtemp(prefix="cxr_download_"))
     print(f"[INFO] Temporary working dir: {tmp_dir}")
 
-    copytree_merge(source_root, tmp_dir)
+    copytree_merge(source_root, tmp_dir, desc="Copy dataset → temp dir")
 
     return tmp_dir
 

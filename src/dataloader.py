@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -9,6 +10,7 @@ from typing import Any, Callable
 import pandas as pd
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
+from tqdm.auto import tqdm
 
 from src.config import (
     BATCH_SIZE,
@@ -17,6 +19,7 @@ from src.config import (
     IMAGE_SIZE,
     RAW_DIR,
     SEED,
+    SHOW_DATASET_CACHE_PROGRESS,
     SPLITS_DIR,
     ensure_dir,
 )
@@ -414,6 +417,25 @@ def load_image_from_path(
     return image, tf.cast(label, tf.int32)
 
 
+def warm_tf_dataset_cache(
+    ds: tf.data.Dataset,
+    *,
+    num_samples: int,
+    batch_size: int,
+    desc: str,
+) -> None:
+    """
+    Egy teljes epochnyi bejárás a batch-elt pipeline-on: kitölti a ``.cache()`` RAM
+    cache-t. Ez ugyanaz a munka, amit egyébként az első Keras epoch csendben végez —
+    itt tqdm batch sor látható.
+    """
+    if num_samples <= 0:
+        return
+    n_batches = max(1, math.ceil(num_samples / batch_size))
+    for _ in tqdm(ds, total=n_batches, desc=desc, unit="batch"):
+        pass
+
+
 # =========================================================
 # Augmentation
 # =========================================================
@@ -503,7 +525,9 @@ def build_datasets_from_split_csvs(
     cache: bool = CACHE_DATASET,
     image_size: tuple[int, int] = IMAGE_SIZE,
     channels: int = 1,
+    cache_warmup_progress: bool | None = None,
 ):
+    """Train/val/test CSV-kből tf.data; ``cache=True`` mellett tqdm-mal előmelegíthető a RAM-cache."""
     split_dir = Path(split_dir)
     data_root = Path(data_root) if data_root is not None else RAW_DIR
 
@@ -543,6 +567,31 @@ def build_datasets_from_split_csvs(
         image_size=image_size,
         channels=channels,
     )
+
+    do_warm = (
+        cache_warmup_progress
+        if cache_warmup_progress is not None
+        else SHOW_DATASET_CACHE_PROGRESS
+    )
+    if cache and do_warm:
+        warm_tf_dataset_cache(
+            train_ds,
+            num_samples=len(train_df),
+            batch_size=batch_size,
+            desc="TF cache: train",
+        )
+        warm_tf_dataset_cache(
+            val_ds,
+            num_samples=len(val_df),
+            batch_size=batch_size,
+            desc="TF cache: val",
+        )
+        warm_tf_dataset_cache(
+            test_ds,
+            num_samples=len(test_df),
+            batch_size=batch_size,
+            desc="TF cache: test",
+        )
 
     return train_ds, val_ds, test_ds
 
